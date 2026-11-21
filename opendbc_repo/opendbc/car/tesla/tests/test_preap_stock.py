@@ -91,11 +91,15 @@ def test_full_literal_fingerprint_is_unique_in_production_candidate_inventory():
   from opendbc.car.fingerprints import all_legacy_fingerprint_cars, eliminate_incompatible_cars
   from opendbc.car.tesla.fingerprints import FINGERPRINTS
 
-  candidates = all_legacy_fingerprint_cars()
-  assert len(FINGERPRINTS[CAR.TESLA_MODEL_S_PREAP]) == 1
-  for address, length in FINGERPRINTS[CAR.TESLA_MODEL_S_PREAP][0].items():
-    candidates = eliminate_incompatible_cars(SimpleNamespace(address=address, dat=bytes(length)), candidates)
-  assert candidates == [CAR.TESLA_MODEL_S_PREAP]
+  # Entry 0: original literal. Entry 1: SCCM/radar/pedal retrofit car (GTW 0x227 is 5 bytes there).
+  assert len(FINGERPRINTS[CAR.TESLA_MODEL_S_PREAP]) == 2
+  for fingerprint in FINGERPRINTS[CAR.TESLA_MODEL_S_PREAP]:
+    candidates = all_legacy_fingerprint_cars()
+    for address, length in fingerprint.items():
+      candidates = eliminate_incompatible_cars(SimpleNamespace(address=address, dat=bytes(length)), candidates)
+    assert candidates == [CAR.TESLA_MODEL_S_PREAP]
+  assert FINGERPRINTS[CAR.TESLA_MODEL_S_PREAP][0][0x227] == 4
+  assert FINGERPRINTS[CAR.TESLA_MODEL_S_PREAP][1][0x227] == 5
 
 
 def test_controller_attempted_cancel_echo_requires_fresh_native_reconciliation():
