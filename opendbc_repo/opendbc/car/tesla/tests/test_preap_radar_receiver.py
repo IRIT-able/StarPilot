@@ -75,7 +75,13 @@ def test_current_pair_is_required_before_republishing_a_point(mount, missing):
     batch = [(a, d[:-1] if a in omitted else d, b) for a, d, b in batch]
   else:
     batch = [frame for frame in batch if frame[0] not in omitted]
+  # NAP track lifecycle: one incomplete cycle holds the slot as an estimate under the same ID;
+  # it is retired, and later re-identified, only after more than two missed cycles.
   rr = ri.update([(625_000_000, batch)])
+  assert len(rr.points) == 1 and rr.points[0].trackId == previous_id and not rr.points[0].deprecated.measured
+  rr = ri.update([(750_000_000, batch)])
+  assert len(rr.points) == 1
+  rr = ri.update([(875_000_000, batch)])
   assert not rr.points
-  rr = ri.update([(750_000_000, frames(packer))])
+  rr = ri.update([(1_000_000_000, frames(packer))])
   assert len(rr.points) == 1 and rr.points[0].trackId != previous_id

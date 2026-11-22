@@ -13,7 +13,7 @@ def radar_params(offset=0.0, mount=False):
   return cp
 
 
-def radar_interface(cp, offset=0.0, cp_bytes=None):
+def radar_interface(cp, offset=0.0, cp_bytes=None, gate_open=True):
   import hashlib
   from opendbc.car.tesla.preap.radar_profile import RadarStartupContext
   from openpilot.starpilot.car.tesla.radar_settings import offset_float32
@@ -21,11 +21,30 @@ def radar_interface(cp, offset=0.0, cp_bytes=None):
   raw = cp.to_bytes() if cp_bytes is None else cp_bytes
   ri.configure_preap_radar(RadarStartupContext(1, int(cp.safetyConfigs[0].safetyParam),
                                               hashlib.sha256(raw).digest(), offset_float32(offset)), raw)
+  if gate_open:
+    open_gate(ri)
   return ri
 
 
+def open_gate(ri):
+  """Bring the radar-valid gate to VALID before t=0 so decoder tests see points from their first cycle.
+  The gate itself is covered by test_preap_radar_gate.py with real frames."""
+  from collections import defaultdict
+  gate = ri.preap.gate
+  for step in range(31):
+    now = -3.0 + step * 0.1
+    gate.on_echo(now)
+    gate.on_sgu(now, 0, False, False, False)
+    gate.on_alert_matrix(now, defaultdict(int))
+    gate.on_points(now, {0: (30.0, 1.0, -2.0)})
+    gate.update(now)
+  assert gate.valid
+
+
 def frames(packer, *, tracked=True, probability=75.0, distance=30.0, index=0, measured=True, fault=False):
-  result = [packer.make_can_msg("TeslaRadarSguInfo", 1, {"RADC_HWFail": fault})]
+  # Panda gateway echo (src 129) and a clean alert matrix keep the radar-valid gate satisfied.
+  result = [(0x109, bytes(8), 129), packer.make_can_msg("TeslaRadarAlertMatrix", 1, {}),
+            packer.make_can_msg("TeslaRadarSguInfo", 1, {"RADC_HWFail": fault})]
   for i in range(32):
     result.append(packer.make_can_msg(f"RadarPoint{i}_A", 1, {
       "Index": 0, "Tracked": tracked if i == 0 else False, "ProbExist": probability,
@@ -60,7 +79,12 @@ def test_original_index_probability_distance_and_track_retirement(changes):
   for tick in range(1, 5):
     result = ri.update([(tick * 125_000_000, frames(packer))])
   assert len(result.points) == 1
+  # NAP track lifecycle: a slot is held (measured=False) through two missed cycles, then retired.
   result = ri.update([(625_000_000, frames(packer, **changes))])
+  assert len(result.points) == 1 and not result.points[0].deprecated.measured
+  result = ri.update([(750_000_000, frames(packer, **changes))])
+  assert len(result.points) == 1
+  result = ri.update([(875_000_000, frames(packer, **changes))])
   assert not result.points
 
 

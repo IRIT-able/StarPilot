@@ -77,7 +77,11 @@ def test_actual_preap_decoder_to_radard_tracks_errors_retirement_and_recovery():
     source_tick(sm, 73, decoded)
   radar.update(sm, sm["radarTracks"])
   assert radar.radar_state.radarErrors.radarFault and not radar.tracks
+  # A hardware fault closes the radar-valid gate; points return only after it has been VALID-eligible for 2 s.
   rr = decoder.update([(4_750_000_000, frames(packer))])
+  assert not rr.points
+  for cycle in range(1, 21):
+    rr = decoder.update([(4_750_000_000 + cycle * 125_000_000, frames(packer))])
   with structs.RadarData.from_bytes(rr.to_bytes()) as decoded:
     source_tick(sm, 75, decoded)
   radar.update(sm, sm["radarTracks"])
