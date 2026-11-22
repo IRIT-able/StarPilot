@@ -122,18 +122,107 @@ def test_other_status_lengths_are_rejected(radar, length):
   assert rr.errors.canError and not rr.errors.radarFault
 
 
-def test_silent_radar_loses_tracks_and_validity(radar):
+def silent_calls(ri, t0, calls, echo=True):
+  out = []
+  for call in range(calls):
+    frames = [(0x109, bytes(8), 129)] if echo else []
+    out.append(ri.update([(int((t0 + call * 0.01) * 1e9), frames)]))
+  return out
+
+
+def test_silent_radar_loses_tracks_and_validity_and_tells_radard(radar):
   ri, packer = radar
   assert run(ri, packer, 1.0, 6.0).points
-  for call in range(MISSING_RADAR_FRAMES):
-    assert ri.update([(int((6.0 + call * 0.01) * 1e9), [(0x109, bytes(8), 129)])]) is None
+  out = silent_calls(ri, 6.0, 300)
+  # Nothing for the first 0.5 s, then an empty message with a CAN error every 5th call for as long as it lasts.
+  assert all(rr is None for rr in out[:MISSING_RADAR_FRAMES - 1])
+  published = [rr for rr in out[MISSING_RADAR_FRAMES - 1:] if rr is not None]
+  assert len(published) == (300 - MISSING_RADAR_FRAMES) // 5 + 1
+  assert all(not rr.points and rr.errors.canError for rr in published)
   assert not ri.preap.gate.valid and not ri.preap.tracks.points
-  assert not run(ri, packer, 6.5, 8.0).points
-  assert run(ri, packer, 8.0, 12.0).points
+  assert not run(ri, packer, 9.0, 10.5).points
+  assert run(ri, packer, 10.5, 14.0).points
+
+
+def test_echo_loss_between_two_radar_cycles_still_drops_valid(radar):
+  ri, packer = radar
+  assert run(ri, packer, 1.0, 6.0).points
+  # No radar cycle and no echo for just over 2 s (calls without a trigger), then both return together.
+  silent_calls(ri, 6.0, 49, echo=False)        # under the silence threshold, so only the echo rule can act
+  ri.update(cycle(packer, 6.5, echo=False))
+  silent_calls(ri, 6.51, 49, echo=False)
+  ri.update(cycle(packer, 7.0, echo=False))
+  silent_calls(ri, 7.01, 49, echo=False)
+  ri.update(cycle(packer, 7.5, echo=False))
+  silent_calls(ri, 7.51, 49, echo=False)
+  out = silent_calls(ri, 8.0, 3, echo=False)   # 2.0 s without an echo passes here, between radar cycles
+  assert not ri.preap.gate.valid and out[-1] is None
+  # Echo and radar return in the same call: points must be re-earned over 2 s.
+  assert not ri.update(cycle(packer, 8.05)).points
+  assert not run(ri, packer, 8.125, 9.5).points
+
+
+@pytest.mark.parametrize("frame", ((0x109, bytes(8), 1), (0x109, bytes(8), 193), (0x108, bytes(8), 129), (0x109, bytes(8), 0),
+                                   (0x36E, bytes(8), 129)))
+def test_only_a_returned_gateway_frame_counts_as_an_echo(radar, frame):
+  ri, packer = radar
+  rr, t = None, 1.0
+  while t < 8.0:
+    packets = cycle(packer, t, echo=False)
+    packets[0][1].append(frame)
+    rr = ri.update(packets)
+    t += DT
+  assert not rr.points and ri.preap.gate.fault == "NO_ECHO"
+
+
+def test_echo_addresses_are_exactly_what_the_panda_feeds_the_radar():
+  import os, re
+  from opendbc.car.tesla.preap.radar_valid import GTW_ECHO_ADDRS
+  from opendbc.safety import __file__ as safety_init
+  header = open(os.path.join(os.path.dirname(safety_init), "modes", "tesla_preap.h")).read()
+  listed = {int(a, 16) for a in re.findall(r"\{(0x[0-9a-fA-F]+), 1, \d", header)}
+  assert listed == set(GTW_ECHO_ADDRS)
+
+
+def frozen_cycle(packer, t, sgu_fail=True):
+  sgu = packer.make_can_msg("TeslaRadarSguInfo", 1, {"RADC_SGUFail": sgu_fail})
+  msgs = [sgu]
+  for i in range(32):
+    msgs.append(packer.make_can_msg(f"RadarPoint{i}_A", 1, {"Tracked": i < 4, "Meas": 1, "Index": 1, "LongDist": 20.0 + 5 * i,
+                                                            "LongSpeed": 0.0, "ProbExist": 96.875}))
+    msgs.append(packer.make_can_msg(f"RadarPoint{i}_B", 1, {"Index2": 1}))
+  msgs += [packer.make_can_msg("TeslaRadarAlertMatrix", 1, {}), (0x109, bytes(8), 129)]
+  return [(int(t * 1e9), msgs)]
 
 
 def test_frozen_table_with_sgu_fail_is_a_radar_fault(radar):
   ri, packer = radar
-  # NAP rule needs four or more identical points for 40 cycles; one point never trips it.
-  rr = run(ri, packer, 1.0, 10.0, status={"RADC_SGUFail": 1}, vrel=0.0)
+  # NAP rule: four or more identical points for 40 cycles together with SGUFail.
+  for n in range(39):
+    rr = ri.update(frozen_cycle(packer, 1.0 + n * DT))
+    assert not rr.errors.radarFault
+  rr = ri.update(frozen_cycle(packer, 1.0 + 39 * DT))
+  assert rr.errors.radarFault and not rr.points
+  # The same frozen table without SGUFail is not a fault; one point never trips it.
+  ri2 = radar_interface(radar_params(), gate_open=False)
+  ri2.update([])
+  for n in range(60):
+    rr = ri2.update(frozen_cycle(packer, 1.0 + n * DT, sgu_fail=False))
+  assert not rr.errors.radarFault
+  rr = run(ri2, packer, 20.0, 30.0, status={"RADC_SGUFail": 1}, vrel=0.0)
   assert not rr.errors.radarFault and not rr.points
+
+
+def test_silences_do_not_reset_the_frozen_table_count(radar):
+  ri, packer = radar
+  t = 1.0
+  rr = None
+  for burst in range(4):
+    for n in range(12):
+      rr = ri.update(frozen_cycle(packer, t)); t += DT
+      if rr.errors.radarFault:
+        break
+    if rr.errors.radarFault:
+      break
+    silent_calls(ri, t, 60); t += 0.6
+  assert rr.errors.radarFault

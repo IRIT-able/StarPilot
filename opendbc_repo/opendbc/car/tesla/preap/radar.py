@@ -31,6 +31,7 @@ BOSCH_TRACK_MAX_VELOCITY_DELTA_MPS = 10.0
 
 # BogPilot: after this many update calls (100 Hz) without the cycle trigger, tracks and gate validity are dropped.
 MISSING_RADAR_FRAMES = 50
+MISSING_RADAR_PUBLISH_DIV = 5
 _RADAR_FEED_FLAG = 2
 
 
@@ -170,16 +171,26 @@ class PreAPRadarInterface(RadarInterfaceBase):
       self.gate.on_alert_matrix(now, self.rcp.vl[_BOSCH_RADAR_ALERT_MSG])
 
     if self.trigger_msg not in self.updated_messages:
+      # Evaluate the gate on every call, as BogPilot does: a lost-echo fault that starts and clears between
+      # two radar cycles must still drop VALID.
+      self.gate.update(now)
       self.missing_calls += 1
+      if self.missing_calls < MISSING_RADAR_FRAMES:
+        return None
       if self.missing_calls == MISSING_RADAR_FRAMES:
-        # Radar went silent: never resume on stale tracks or a stale VALID.
+        # Radar went silent: never resume on stale tracks or a stale VALID. The frozen-table count is kept
+        # (NAP), so intermittent silences cannot hide a frozen table.
         self.tracks.clear()
-        self.table_freeze.reset()
         self.gate.valid = False
         self.gate.ok_since = None
         self.gate.last_move = None
-        self.gate.update(now)
-      return None
+      if (self.missing_calls - MISSING_RADAR_FRAMES) % MISSING_RADAR_PUBLISH_DIV != 0:
+        return None
+      # BogPilot publishes an empty message here so radard drops its last tracks instead of following frozen
+      # points; NAP publishes nothing, which ends in a radar fault. Do both: no points, and a CAN error.
+      silent = structs.RadarData()
+      silent.errors.canError = True
+      return silent
     self.missing_calls = 0
 
     ret = structs.RadarData()

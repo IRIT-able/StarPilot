@@ -62,7 +62,7 @@ Files: `opendbc_repo/opendbc/car/tesla/preap/radar.py` (rewritten), `preap/radar
 | `RADC_SensorDirty` -> `radarUnavailableTemporary` | NAP | StarPilot and BogPilot ignored it. |
 | Frozen table (>= 4 points unchanged for 40 cycles) together with `RADC_SGUFail` -> `radarFault` | NAP `preap/radar_table_freeze.py`, copied unchanged | BogPilot only withholds points in this case. On the logged wrong-donor-VIN drives this raises `radarFault` from about 13-15 s after start, as NAP would. On healthy drives it never fires (0 cycles on `00000021`, `00000024`). |
 | **Radar-valid gate**: points reach radard only while VALID | BogPilot `tesla_ap1/preap/radar_valid.py`, copied with behavior unchanged | **Gap fill where BogPilot is safer.** NAP (`e702d13397`) never reads `0x501`: `radar_interface.py` has no reference to it, and `preap/radar_donor_vin.py` only looks at the VIN bit to start a VIN read. So NAP keeps using points after the radar flags `espMIA`/`gtwMIA`/`sccmMIA`/`bdyMIA` or after the panda stops feeding it. That behavior is not carried over. |
-| Radar silent for 50 update calls: tracks cleared, VALID dropped | BogPilot | While silent the interface returns `None` as NAP does (radard sees the gap) instead of BogPilot's empty error-free message. |
+| Radar silent for 50 update calls: tracks cleared, VALID dropped, then an empty message with `canError` every 5th call | BogPilot (empty message, so radard drops its last tracks) plus NAP's outcome (a radar error) | BogPilot's empty message is error-free and NAP publishes nothing; the port does the stricter of each. The gate is evaluated on every call, including calls without a radar cycle, as in BogPilot. The frozen-table count is not reset by a silence (NAP). |
 | Status frame `0x301` accepted at 6 or 8 bytes | This car's logs (6 bytes); NAP's DBC says 6 | StarPilot's filter required 8, so status was never read. The shared generated DBC is left at 8 because the HW1 platform uses it too; all `0x301` signals sit in the first 48 bits. |
 | Frozen startup context, per-address length filter, offset from the context | StarPilot | Kept. |
 
@@ -83,6 +83,11 @@ its tests of its own radar interface, card and pull FSM are replaced), `test_pre
 `test_preap_radar_gate.py` (new, end to end). Existing StarPilot radar tests were changed where they asserted behavior this
 port replaces: immediate track retirement (`test_preap_radar.py`, `test_preap_radar_receiver.py`) and immediate point
 return after a hardware fault (`openpilot/starpilot/car/tesla/tests/test_radar_pipeline.py`).
+
+Safety review of `5e1ba5161` found three blocking issues in the gate wiring and silence handling (gate only evaluated on
+radar cycles; stale tracks left in radard during silence; silences resetting the frozen-table count). All three are fixed in
+the following commit, with tests. Known remaining differences from that review: BogPilot's radard `StuckTrackFilter` is not
+ported, and BogPilot drops a slot the radar marks invalid at once where the port (as NAP) holds it for two cycles.
 
 Open: BogPilot shows a `preapRadarNotReady` warning while the gate is closed. The gate state is available on the interface
 (`RI.preap.gate.status()`), but no StarPilot alert is wired to it yet.
