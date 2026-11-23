@@ -101,6 +101,12 @@ def test_held_estimate_is_dropped_half_a_second_after_its_last_measurement():
   assert 7 not in scenario.radar.tracks and not lead.radar and lead.dRel == pytest.approx(36.0)
 
 
+def test_a_track_never_starts_from_a_held_estimate():
+  scenario = RadarScenario()
+  lead = scenario.step(1.0, vision_d_rel=30.0, radar_points=[(7, 30.0, 0.0, 0.0)], measured=False)
+  assert 7 not in scenario.radar.tracks and not lead.radar
+
+
 def test_association_rejects_distance_outlier():
   lead = RadarScenario().step(1.0, vision_d_rel=100.0, radar_points=[(7, 120.0, 0.0, 0.0)])
   assert not lead.radar

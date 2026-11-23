@@ -220,6 +220,7 @@ class PreAPRadarInterface(RadarInterfaceBase):
         self.gate.last_move = None
         if self.last_cycle_time is not None:
           self.silence_starts.append(now)
+      self.updated_messages.clear()  # nor are halves that trickle in while it lasts
       self.silent_calls += 1
       if (self.silent_calls - 1) % MISSING_RADAR_PUBLISH_DIV != 0:
         return None

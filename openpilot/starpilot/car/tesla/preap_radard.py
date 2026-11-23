@@ -50,12 +50,13 @@ class Track:
     self.aLeadTau = FirstOrderFilter(_LEAD_ACCEL_TAU, 0.45, DT_MDL)
     self.K_A, self.K_C, self.K_K = kalman_params.A, kalman_params.C, kalman_params.K
     self.kf = KF1D([[v_lead], [0.0]], self.K_A, self.K_C, self.K_K)
+    self.measured_at = -math.inf  # no measurement yet: a track never starts from a held estimate
 
   def update(self, d_rel: float, y_rel: float, v_rel: float, v_lead: float, measured: bool = True, kalman_params=None,
              now: float = 0.0):
     self.dRel, self.yRel, self.vRel, self.vLead = d_rel, y_rel, v_rel, v_lead
     self.measured = measured
-    if measured or self.cnt == 0:
+    if measured:
       self.measured_at = now
     if measured and kalman_params is not None:
       state = self.kf.x

@@ -285,7 +285,11 @@ def test_frozen_table_with_sgu_fail_is_a_radar_fault(radar):
   assert not rr.errors.radarFault and not rr.points
 
 
-def test_silences_do_not_reset_the_frozen_table_count(radar):
+def test_silences_do_not_reset_the_frozen_table_count(radar, monkeypatch):
+  from opendbc.car.tesla.preap import radar as radar_module
+  # Real silences (past the drop threshold, so the silence branch runs). The repeated-silence rule is put out of
+  # reach so that only the frozen-table rule can raise the fault.
+  monkeypatch.setattr(radar_module, "SILENCE_REPEAT_COUNT", 1000)
   ri, packer = radar
   t = 1.0
   rr = None
@@ -298,10 +302,10 @@ def test_silences_do_not_reset_the_frozen_table_count(radar):
         break
     if rr.errors.radarFault:
       break
-    # Short of the silence threshold, so the repeated-silence rule cannot be what faults.
-    silent_calls(ri, t, 30); t += 0.3
-  assert not ri.preap.silence_starts
-  assert rr.errors.radarFault and cycles == 40, 'NAP: 40 frozen cycles, counted across the gaps'
+    out = silent_calls(ri, t, 60); t += 0.6
+    assert any(m is not None for m in out) and ri.preap.silent
+  assert len(ri.preap.silence_starts) >= 2
+  assert rr.errors.radarFault and cycles == 40, 'NAP: 40 frozen cycles, counted across the silences'
 
 
 def test_held_slot_is_never_published_past_half_a_second(radar):
