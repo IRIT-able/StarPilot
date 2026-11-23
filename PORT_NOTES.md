@@ -24,6 +24,32 @@ Bosch radar retrofit on bus 1 fed by the panda, newer SCCM retrofit.
 
 So the reference for driving behavior is `e702d13397` with no prebuilt-only change carried over.
 
+## Reference branch tips checked 2026-11-23
+
+| Branch | Pinned | Tip now | What changed |
+|---|---|---|---|
+| BogPilot `fix/preap-all` | `9ed906a641` | `9ed906a641` | Nothing. The other pre-AP branches on that remote are ancestors of it or older lines. |
+| NAP `naponsp-alpha` | `e702d13397` (opendbc `81799e45e`) | `78085a377` (opendbc `d1793c10`), three commits, 2026-09-08 to 09-10 | (1) Seat belt read from `SDM1` with a 1 s age limit instead of hard-coded latched: the port already does this. (2) Hands-on disengage level configurable through safety param bits 8-9, default still 2: the port uses 2. (3) "wait for initial lateral permission": the MADS change already listed under prebuilt-only. (4) Pedal calibration tool sessions reworked (when values are saved, output disabled before saving). The runtime pedal code, the calibration transform (`zero - 1/factor`), VirtualDAS and the panda's pedal rules are unchanged. |
+
+Nothing in the port needs to change for these. Not ported: the configurable hands-on level.
+
+## Evidence from logs recorded with faulty hardware
+
+The owner reports that some logs were recorded with a radar that was not working and possibly a badly calibrated pedal.
+
+- Radar: routes up to `0000001a` are the period in which the radar raised its VIN alert (not usable); from `0000001c` on it
+  worked. Of the two mid-drive radar reboots, one (`00000009`) is from the faulty period, with the radar already reporting
+  a hardware fault. With a working radar the evidence is **one** reboot in 4.8 radar-hours (`00000021`). The reboot
+  signature and its 5.54 s init time are the same in both. The 8 s fault limit rests on that duration; the "2 silences in
+  600 s" window rests on very little data.
+- Pedal: everything the panda checks on `0x552` is raw sensor data and does not depend on the pedal calibration: the
+  channel relationship (median residual within 0.11 units of the fitted line in each of the 43 routes, slopes 0.0074-0.0103),
+  the sensor floors, checksum, counter and interceptor state. The calibration values in use during those drives are not
+  recorded in the logs. Anything expressed in DI (gas pressed above 2 DI, the earlier "channel 2 reads as pressed on 1 % of
+  frames") depends on a calibration that cannot be verified from the logs.
+- The idle and engage wire sequence taken from the logs is also what BogPilot's current code does (silent while idle,
+  disabled frames to wake the interceptor from its timeout or startup state, enabled frames only in state 0).
+
 ## Approach
 
 StarPilot `testing` already had a pre-AP Model S stack (platform `TESLA_MODEL_S_PREAP`, safety mode 39). It is an older
