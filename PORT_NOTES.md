@@ -164,8 +164,8 @@ and 1.8 s anywhere; boot gaps (1.8-2.2 s, before the feed starts) are the only o
 |---|---|---|
 | > 0.45 s | Tracks and VALID dropped, empty error-free `radarTracks` every 5th call: radard drops its tracks and follows camera leads. No error. | BogPilot |
 | > 1.0 s | `starpilotCarState.preapRadarStatus = 2`: "Radar Silent / Using Camera Lead", warning only. Status 1 ("Radar Not Ready") while the gate is closed for any other reason, as BogPilot's `preapRadarNotReady`. | Owner |
-| > 8.0 s (**proposed, awaiting owner**) | `radarFault` (soft disable, no entry) until the radar is back. Also applies to a radar that never speaks after startup. | One reboot is 5.66-5.68 s; 8 s is 40 % above it. |
-| 2 silences within 600 s (**proposed, awaiting owner**) | `radarFault` while both are inside the window. | Observed: never more than one per route, 0.2 per radar hour. |
+| > 8.0 s (owner accepted 2026-11-23) | `radarFault` (soft disable, no entry) until the radar is back. Also applies to a radar that never speaks after startup. | One reboot is 5.66-5.68 s; 8 s is 40 % above it. |
+| 2 silences within 600 s (owner accepted 2026-11-23) | `radarFault` while both are inside the window. | Observed: never more than one per route, 0.2 per radar hour. |
 
 After a silence the points return only when the gate has been VALID-eligible for 2 s again.
 
@@ -200,7 +200,7 @@ engagements, each `disabled-zero` frames 20 ms apart, `STATE` 5 -> 0 within 4-45
 the end, and `STATE` back to 5 after 196-247 ms. StarPilot's alternative (disabled frames at 50 Hz all the time) appears in
 no log from this interceptor, so it is not equally proven.
 
-Known limit of W1 + W2, for the owner to accept or not (independent review, 2026-11-23): with channel 1 stuck, the
+Known limit of W1 + W2, accepted by the owner on 2026-11-23 (found by the independent review): with channel 1 stuck, the
 driver's press is seen only through the agreement check, after 4.0 units of pedal travel (3.7 %) from a centered pair and
 up to 8.0 units (7.4 %) if the pair sat at the far edge of the band when it stuck
 (`test_stuck_channel_from_anywhere_in_the_band_is_caught_within_twice_the_tolerance`). Before the change that was about
