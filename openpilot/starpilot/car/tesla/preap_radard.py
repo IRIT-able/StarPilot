@@ -51,9 +51,12 @@ class Track:
     self.K_A, self.K_C, self.K_K = kalman_params.A, kalman_params.C, kalman_params.K
     self.kf = KF1D([[v_lead], [0.0]], self.K_A, self.K_C, self.K_K)
 
-  def update(self, d_rel: float, y_rel: float, v_rel: float, v_lead: float, measured: bool = True, kalman_params=None):
+  def update(self, d_rel: float, y_rel: float, v_rel: float, v_lead: float, measured: bool = True, kalman_params=None,
+             now: float = 0.0):
     self.dRel, self.yRel, self.vRel, self.vLead = d_rel, y_rel, v_rel, v_lead
     self.measured = measured
+    if measured or self.cnt == 0:
+      self.measured_at = now
     if measured and kalman_params is not None:
       state = self.kf.x
       self.K_A, self.K_C, self.K_K = kalman_params.A, kalman_params.C, kalman_params.K
@@ -165,10 +168,14 @@ class PreAPRadarPolicy:
         v_lead = v_rel + radard.v_ego_hist[0]
         if ids not in radard.tracks:
           radard.tracks[ids] = Track(ids, v_lead, kalman_params)
-        radard.tracks[ids].update(d_rel, y_rel, v_rel, v_lead, measured, kalman_params)
+        radard.tracks[ids].update(d_rel, y_rel, v_rel, v_lead, measured, kalman_params, radar_time)
     elif self.last_radar_update_time is None or now - self.last_radar_update_time > RADAR_MEASUREMENT_TIMEOUT:
       # Never follow radar tracks older than 0.5 s, whatever the receiver published last.
       radard.tracks.clear()
+    # The same limit per track, counted from its last real measurement: a slot the receiver is only holding
+    # as an estimate cannot outlive it.
+    for ids in [ids for ids, track in radard.tracks.items() if now - track.measured_at > RADAR_MEASUREMENT_TIMEOUT]:
+      del radard.tracks[ids]
 
   @staticmethod
   def valid(sm) -> bool:

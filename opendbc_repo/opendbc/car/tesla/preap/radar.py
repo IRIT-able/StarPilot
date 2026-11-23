@@ -33,7 +33,10 @@ BOSCH_TRACK_MAX_VELOCITY_DELTA_MPS = 10.0
 # Radar silence (no cycle trigger), tiered. Measured on this car: the radar reboots itself now and then with
 # the panda feed healthy (2 events in 10.1 h, 5.66 s and 5.68 s, init time identical to 0.3 ms); nothing else
 # between 0.16 s and 1.8 s was ever seen mid-drive.
-SILENCE_DROP_S = 0.5            # tracks and VALID dropped, empty error-free message: camera leads (BogPilot)
+# Tracks and VALID dropped, empty error-free message: camera leads (BogPilot at 0.5 s). Slightly earlier here so the
+# empty message is out before radard's own 0.5 s limits, and no radar data older than 0.5 s is ever in use.
+SILENCE_DROP_S = 0.45
+MAX_MEASUREMENT_AGE_S = 0.5     # a held (unmeasured) slot is never published past this age
 SILENCE_WARN_S = 1.0            # driver warning, no disengage
 SILENCE_FAULT_S = 8.0           # longer than one radar reboot: radarFault
 SILENCE_REPEAT_WINDOW_S = 600.0  # a second silence inside this window: radarFault while both are inside it
@@ -62,6 +65,7 @@ REJECTED = object()
 class BoschTrack:
   point: structs.RadarData.RadarPoint
   missed_cycles: int = 0
+  measured_at: float = 0.0
 
 
 class BoschTrackLifecycle:
@@ -81,7 +85,7 @@ class BoschTrackLifecycle:
   def clear(self):
     self._slots.clear()
 
-  def update(self, slot: int, observation):
+  def update(self, slot: int, observation, now: float = 0.0):
     track = self._slots.get(slot)
     if observation is REJECTED:
       # BogPilot: a target the radar has withdrawn is dropped on the same cycle. The hold below is only for
@@ -92,7 +96,7 @@ class BoschTrackLifecycle:
       if track is None:
         return
       track.missed_cycles += 1
-      if track.missed_cycles > BOSCH_TRACK_MAX_MISSED_CYCLES:
+      if track.missed_cycles > BOSCH_TRACK_MAX_MISSED_CYCLES or now - track.measured_at > MAX_MEASUREMENT_AGE_S:
         del self._slots[slot]
       else:
         track.point.deprecated.measured = False
@@ -106,6 +110,7 @@ class BoschTrackLifecycle:
       self._slots[slot] = track
 
     track.missed_cycles = 0
+    track.measured_at = now
     track.point.dRel = observation.d_rel
     track.point.yRel = observation.y_rel
     track.point.vRel = observation.v_rel
@@ -209,6 +214,7 @@ class PreAPRadarInterface(RadarInterfaceBase):
         self.silent = True
         self.silent_calls = 0
         self.tracks.clear()
+        self.updated_messages.clear()  # halves received before or during the silence are not a fresh cycle
         self.gate.valid = False
         self.gate.ok_since = None
         self.gate.last_move = None
@@ -227,7 +233,8 @@ class PreAPRadarInterface(RadarInterfaceBase):
     self.last_cycle_time = now
 
     ret = structs.RadarData()
-    if not self.rcp.can_valid:
+    can_valid = self.rcp.can_valid  # read once: every read advances the parser's invalid-count debounce
+    if not can_valid:
       ret.errors.canError = True
 
     radar_status = self.rcp.vl[_BOSCH_RADAR_STATUS_MSG]
@@ -247,7 +254,7 @@ class PreAPRadarInterface(RadarInterfaceBase):
       # Require both halves since the last trigger before accepting an observation.
       if msg_a_id in self.updated_messages and msg_b_id in self.updated_messages:
         observation = self._parse_track(self.rcp.vl[msg_a_id], self.rcp.vl[msg_b_id])
-      self.tracks.update(i, observation)
+      self.tracks.update(i, observation, now)
 
     points = self.tracks.points
     # NAP: a frozen table together with SGUFail is a radar fault.
@@ -258,8 +265,8 @@ class PreAPRadarInterface(RadarInterfaceBase):
     if _BOSCH_RADAR_STATUS_MSG in self.updated_messages:
       self.gate.on_sgu(now, int(radar_status["RADC_SGU_ITC"]), sgu_fail, hw_fail, dirty)
     self.gate.on_points(now, self.tracks.observations())
-    # BogPilot: no points while the parser is invalid, whatever the gate says.
-    ret.points = points if (self.gate.update(now) and self.rcp.can_valid) else []
+    # No points while the parser is invalid, whatever the gate says (stricter than both references).
+    ret.points = points if (self.gate.update(now) and can_valid) else []
 
     self.updated_messages.clear()
     return ret

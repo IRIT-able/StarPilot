@@ -556,10 +556,12 @@ class SelfdriveD:
           self.events.add(EventName.cameraFrameRate)
     if not REPLAY and self.rk.lagging:
       self.events.add(EventName.selfdrivedLagging)
-    if self.CP.openpilotLongitudinalControl:
+    # Tesla pre-AP with the radar retrofit: radar errors count with or without pedal longitudinal (NAP), and
+    # invalid radar data disengages at once, as in both of its references.
+    preap_radar = (getattr(self.CP, 'carFingerprint', None) == 'TESLA_MODEL_S_PREAP' and getattr(self.CP, 'brand', None) == 'tesla' and
+                   not getattr(self.CP, 'radarUnavailable', True))
+    if self.CP.openpilotLongitudinalControl or preap_radar:
       if self.sm['radarState'].radarErrors.canError:
-        # Tesla pre-AP: invalid radar data disengages at once, as in both of its references.
-        preap_radar = self.CP.brand == 'tesla' and self.CP.carFingerprint == 'TESLA_MODEL_S_PREAP'
         self.events.add(EventName.canError if preap_radar else EventName.radarFault)
       elif self.sm['radarState'].radarErrors.radarUnavailableTemporary:
         self.events.add(EventName.radarTempUnavailable)

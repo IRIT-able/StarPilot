@@ -124,12 +124,21 @@ and 1.8 s anywhere; boot gaps (1.8-2.2 s, before the feed starts) are the only o
 
 | Silence | Behavior | Value from |
 |---|---|---|
-| > 0.5 s | Tracks and VALID dropped, empty error-free `radarTracks` every 5th call: radard drops its tracks and follows camera leads. No error. | BogPilot |
+| > 0.45 s | Tracks and VALID dropped, empty error-free `radarTracks` every 5th call: radard drops its tracks and follows camera leads. No error. | BogPilot |
 | > 1.0 s | `starpilotCarState.preapRadarStatus = 2`: "Radar Silent / Using Camera Lead", warning only. Status 1 ("Radar Not Ready") while the gate is closed for any other reason, as BogPilot's `preapRadarNotReady`. | Owner |
 | > 8.0 s (**proposed, awaiting owner**) | `radarFault` (soft disable, no entry) until the radar is back. Also applies to a radar that never speaks after startup. | One reboot is 5.66-5.68 s; 8 s is 40 % above it. |
 | 2 silences within 600 s (**proposed, awaiting owner**) | `radarFault` while both are inside the window. | Observed: never more than one per route, 0.2 per radar hour. |
 
 After a silence the points return only when the gate has been VALID-eligible for 2 s again.
+
+No radar data older than 0.5 s is used anywhere (fourth review): the drop starts at 0.45 s so the empty message is out
+before radard's own 0.5 s limit; a slot the receiver holds as an estimate is dropped once its last real measurement is
+0.5 s old (receiver and radard both enforce it, neither reference does); frame halves received before a silence are not
+counted as a fresh cycle after it.
+
+Radar errors reach selfdrived for this car whenever the radar retrofit is configured, with or without pedal
+longitudinal (NAP; BogPilot and StarPilot only with openpilot longitudinal): `canError` -> immediate disable, `radarFault`
+-> soft disable. Test: `openpilot/starpilot/car/tesla/tests/test_preap_radar_events.py`.
 `preapRadarStatus @40` is a new `StarPilotCarState` field, registered in `fixtures/custom_reviewed_schema_additions.json`.
 
 ### 3. Panda safety (mode 39): pedal interceptor checks and reference tightenings

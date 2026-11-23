@@ -145,6 +145,7 @@ def test_silent_radar_drops_tracks_at_once_and_degrades_to_camera_leads_without_
   out = silence(ri, 6.0, 5.7)                   # one radar reboot, as logged (5.66 s and 5.68 s)
   # Nothing for the first 0.5 s (the receiver's last tracks are already unmeasured estimates by then), then an
   # empty message every 5th call: no points, no error of any kind.
+  assert SILENCE_DROP_S < 0.5
   assert all(rr is None for age, rr in out if age <= SILENCE_DROP_S)
   published = [rr for age, rr in out if rr is not None]
   assert len(published) == pytest.approx(len([1 for age, _ in out if age > SILENCE_DROP_S]) / 5, abs=1)
@@ -199,7 +200,7 @@ def test_second_silence_inside_the_window_is_a_radar_fault_for_as_long_as_both_a
 def test_radar_that_never_speaks_is_error_free_at_first_and_a_fault_after_the_limit():
   ri = radar_interface(radar_params(), gate_open=False)
   out = [(call * 0.01, ri.update([(int((1.0 + call * 0.01) * 1e9), [(0x109, bytes(8), 129)])])) for call in range(1000)]
-  assert all(rr is None for age, rr in out if age <= SILENCE_DROP_S)
+  assert all(rr is None for age, rr in out if age <= SILENCE_DROP_S - 0.011)
   early = [rr for age, rr in out if rr is not None and age <= SILENCE_FAULT_S]
   late = [rr for age, rr in out if rr is not None and age > SILENCE_FAULT_S + 0.05]
   assert early and all(not any(rr.errors.to_dict().values()) for rr in early)
@@ -288,13 +289,26 @@ def test_silences_do_not_reset_the_frozen_table_count(radar):
   ri, packer = radar
   t = 1.0
   rr = None
-  for burst in range(4):
+  cycles = 0
+  for burst in range(5):
     for n in range(12):
       rr = ri.update(frozen_cycle(packer, t)); t += DT
+      cycles += 1
       if rr.errors.radarFault:
         break
     if rr.errors.radarFault:
       break
-    silent_calls(ri, t, 60); t += 0.6
-  assert rr.errors.radarFault
-  assert not ri.preap._repeated_silence(t) or len(ri.preap.silence_starts) >= 2
+    # Short of the silence threshold, so the repeated-silence rule cannot be what faults.
+    silent_calls(ri, t, 30); t += 0.3
+  assert not ri.preap.silence_starts
+  assert rr.errors.radarFault and cycles == 40, 'NAP: 40 frozen cycles, counted across the gaps'
+
+
+def test_held_slot_is_never_published_past_half_a_second(radar):
+  ri, packer = radar
+  assert run(ri, packer, 1.0, 6.0).points
+  # Slow incomplete cycles 0.3 s apart (not a silence): the held estimate must go once its measurement is 0.5 s old,
+  # even though it has missed only two cycles.
+  incomplete = lambda t: [(int(t * 1e9), [f for f in cycle(packer, t)[0][1] if f[0] != 784])]
+  assert len(ri.update(incomplete(LAST_CYCLE + 0.3)).points) == 1
+  assert not ri.update(incomplete(LAST_CYCLE + 0.6)).points

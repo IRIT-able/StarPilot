@@ -89,6 +89,18 @@ def test_empty_radar_message_drops_tracks_at_once():
   assert lead.dRel == pytest.approx(36.0)
 
 
+def test_held_estimate_is_dropped_half_a_second_after_its_last_measurement():
+  # The receiver keeps publishing a slot as an unmeasured estimate; radard must not follow it past 0.5 s.
+  scenario = RadarScenario()
+  assert scenario.step(1.0, vision_d_rel=30.0, radar_points=[(7, 30.0, 0.0, 0.0)]).radar
+  lead = None
+  for k in range(1, 12):
+    lead = scenario.step(1.0 + k * 0.05, vision_d_rel=36.0, radar_points=[(7, 30.0, 0.0, 0.0)], measured=False)
+    if k * 0.05 <= RADAR_MEASUREMENT_TIMEOUT:
+      assert 7 in scenario.radar.tracks
+  assert 7 not in scenario.radar.tracks and not lead.radar and lead.dRel == pytest.approx(36.0)
+
+
 def test_association_rejects_distance_outlier():
   lead = RadarScenario().step(1.0, vision_d_rel=100.0, radar_points=[(7, 120.0, 0.0, 0.0)])
   assert not lead.radar

@@ -22,7 +22,7 @@ def test_bad_receiver_frames_do_not_refresh_bosch_cycle_or_hide_expiry(mount, fa
   for cycle in range(5, 17):
     # Unusable frames are a silent radar: nothing at first, then (after 0.5 s) empty error-free messages.
     rr = ri.update([(cycle * 125_000_000, bad)])
-    assert rr is None or (cycle * 0.125 > 1.0 and not rr.points and not any(rr.errors.to_dict().values()))
+    assert rr is None or (cycle * 0.125 - 0.5 > 0.45 and not rr.points and not any(rr.errors.to_dict().values()))
   # Original decoder publishes only on the final B trigger. Do not invent an
   # immediate error publication or immediate cached-point retirement.
   trigger = packer.make_can_msg('RadarPoint31_B', 1, {'Index2': 0})
