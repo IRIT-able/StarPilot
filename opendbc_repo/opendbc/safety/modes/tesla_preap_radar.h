@@ -40,12 +40,6 @@ static void tesla_preap_radar_put(CANPacket_t *msg, unsigned int offset, uint32_
   for (unsigned int i = 0U; i < 4U; i++) { msg->data[offset + i] = (uint8_t)(value >> (8U * i)); }
 }
 
-static void tesla_preap_radar_sum(CANPacket_t *msg) {
-  unsigned int sum = (msg->addr & 255U) + (msg->addr >> 8U);
-  for (unsigned int i = 0U; i < (GET_LEN(msg) - 1U); i++) { sum += msg->data[i]; }
-  msg->data[GET_LEN(msg) - 1U] = (uint8_t)(sum & 255U);
-}
-
 static void tesla_preap_radar_emit(CANPacket_t *packet) {
   if (tesla_preap_radar_enabled && !relay_malfunction && (tesla_preap_radar_ticket == NULL)) {
     can_set_checksum(packet);
@@ -83,7 +77,7 @@ static void tesla_preap_radar_rx(const CANPacket_t *msg) {
         (tesla_preap_radar_nosecone ? 16U : 0U);
       tesla_preap_radar_put(&packet, 0U, low);
       tesla_preap_radar_put(&packet, 4U, high);
-      tesla_preap_radar_sum(&packet);
+      // Byte 7 stays the patched config byte, as in both references: 0x2A9 carries no checksum.
       tesla_preap_radar_emit(&packet);
     } else if (msg_matches(msg, 0xEU, 0U, 8U) && (tesla_preap_crc(msg) == msg->data[7])) {
       CANPacket_t packet = *msg;

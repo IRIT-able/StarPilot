@@ -132,9 +132,55 @@ and 1.8 s anywhere; boot gaps (1.8-2.2 s, before the feed starts) are the only o
 After a silence the points return only when the gate has been VALID-eligible for 2 s again.
 `preapRadarStatus @40` is a new `StarPilotCarState` field, registered in `fixtures/custom_reviewed_schema_additions.json`.
 
+### 3. Panda safety (mode 39): pedal interceptor checks and reference tightenings
+
+Files: `opendbc_repo/opendbc/safety/modes/tesla_preap_pedal.h`, `tesla_preap.h`, `tesla_preap_radar.h`.
+Evidence for every number: all 600 logged segments, 1,703,610 `0x552` frames (`work/probe/pedal_w.py`, `pedal_w_all.jsonl`).
+Pedal travel in those logs runs from raw 416 to 2543 on channel 1 = 21.1 to 129.2 physical units, 108 units rest to floor.
+
+Relaxed from StarPilot `0db704125` (owner approved 2026-11-23). Each is still stricter than NAP and BogPilot, which check
+nothing on `0x552` beyond a timeout and read channel 1 only.
+
+| # | StarPilot before | This car | Now | Still caught (test) |
+|---|---|---|---|---|
+| W1 | Channels must agree within 0.203 units (0.19 % of travel) | Difference -3.35 to +2.49 units. It depends weakly on position: median -0.51 at rest, about 0 at mid travel. Fitted: `one - 2*two = 0.00844*one - 14.17` raw counts; every frame within 2.98 units of the fit (sd 0.86) | Agreement checked against that fitted line, tolerance **4.0 units = 3.7 % of pedal travel** | Open (raw 0), shorted (4095, 65534, 65535) or stuck on **either** channel, engaged or idle: `test_open_or_shorted_channel_on_either_side_disengages`, `test_stuck_channel_on_either_side_disengages_within_the_tolerance` (trips after 4.0 units of pedal movement), `test_agreement_boundary_around_the_measured_relationship` |
+| W2 | Gas pressed if either channel > 2.0 DI | Channel 2's offset read as pressed at rest on about 1 % of frames | Driver demand from channel 1 (both references); channel 2 only in the W1 check, which stays | `test_channel2_offset_is_not_driver_demand_but_channel1_is` |
+| W3 | Counter must be previous + 1 | 135 breaks, every one a single missing frame (advance 2, 35-48 ms apart). None at the 557 segment joins: they are on the bus, not a logging artifact. 132 in the first 15 s after boot, 3 mid-drive, all while idle | Advance 1 **or 2** accepted. The owner approved 1-3; 3 was never seen, so it stays rejected | Repeated (0), 3, 4, 8, 15: `test_repeated_or_jumping_counter_disengages`; frozen frame: `test_frozen_frame_replayed_forever_disengages`; stream stopped (200 ms, StarPilot's existing rule): `test_stalled_interceptor_withdraws_longitudinal_and_lateral` |
+| Idle | `STATE` must be 0 | The interceptor reports `STATE` 5 (command timeout) whenever nothing commands it; BogPilot sent nothing on `0x551` while idle | `STATE` 5 accepted only while not commanding: never after an enabled command, and not once a `0x551` stream is older than 100 ms. An enabled command needs the latest `STATE` to be 0. `STATE` 5 withdraws the longitudinal permission until a new disabled frame | `test_silent_idle_keeps_lateral_and_engages_with_the_logged_sequence`, `test_state5_while_a_command_stream_is_running_is_a_fault`, `test_state5_after_an_enabled_command_is_a_fault`, `test_any_other_interceptor_state_is_a_fault` |
+
+Idle wire behavior chosen: **silent** (nothing on `0x551` while not engaged), which is what the logged drives did: 13
+engagements, each `disabled-zero` frames 20 ms apart, `STATE` 5 -> 0 within 4-45 ms, then enabled frames, a disabled frame at
+the end, and `STATE` back to 5 after 196-247 ms. StarPilot's alternative (disabled frames at 50 Hz all the time) appears in
+no log from this interceptor, so it is not equally proven.
+
+A failed check sets `gas_pressed`, clears `controls_allowed` and the physical arm, and needs a fresh stalk pull, as before.
+
+Tightened to match or exceed both references:
+
+| Change | Source | Test |
+|---|---|---|
+| `0x552` byte 5 checksum (`0x52 + 0x05 + bytes 0..4`) validated; it was unchecked. Valid on all 1.7 M logged frames | This car | `test_bad_feedback_checksum_disengages` |
+| `DI_torque2.DI_brakePedal` (`0x118` byte 1 bit 7) is a second brake source, ORed with `0x20A` | Both references | `test_either_brake_source_withdraws_and_one_releasing_does_not_clear_the_other` |
+| Hands-on level 2 disengages (was 3) | NAP | `test_hands_on_level_2_disengages` |
+| Steering: BogPilot's per-frame table (8/4/2.5 deg up, 9/5/4.5 down at 2/7/17 m/s) and absolute 360 deg cap, on top of the vehicle-model limits | BogPilot | `test_low_speed_steering_rate_follows_the_table`, `test_absolute_angle_cap_is_360_deg` |
+| Enabled pedal command capped at raw 2500 on channel 1, on top of the calibrated bounds | BogPilot | `test_enabled_command_above_raw_2500_is_rejected_whatever_the_calibration_allows` |
+| `0x2A9` byte 7 left as the patched config byte (StarPilot overwrote it with a sum) | Both references; the logged `0x2A9` ends in `0x10` | `test_tesla_preap_radar.py::test_mount_and_counter_transforms_have_independent_literal_bytes` (expected bytes changed from `...f0`/`...00` to `...10`) |
+
+Each test was checked by loosening its rule in a scratch copy and confirming the test fails.
+
+Not ported on purpose (StarPilot is stricter without them): donor-VIN config `0x560`, radar UDS `0x641`, bus-0 `0x2B9`,
+`0x3E9`, hands-on pause, the panda pedal-calibration mode, NAP's "brake does not drop controls".
+
 ## Checks removed
 
-None yet. Behavior replaced (not a safety check): StarPilot's immediate radar track retirement, see section 2.
+| Check | Was | Now | Why |
+|---|---|---|---|
+| `0x552` exact two-channel agreement | 0.203 units | 4.0 units around the measured relationship | W1 above |
+| Gas from either channel | max of both | channel 1 | W2 above |
+| `0x552` counter + 1 | exact | + 1 or + 2 | W3 above |
+| Interceptor `STATE` must be 0 | always | 0, or 5 while not commanding | Idle above |
+
+Behavior replaced (not a safety check): StarPilot's immediate radar track retirement on an incomplete cycle, see section 2.
 
 ## Adaptations for StarPilot/FrogPilot infrastructure
 

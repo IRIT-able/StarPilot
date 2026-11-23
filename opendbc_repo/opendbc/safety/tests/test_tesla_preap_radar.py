@@ -130,8 +130,8 @@ class TestTeslaPreapRadar(unittest.TestCase):
       self.assertEqual(self.safety.get_recorded_can_count(), int(parameter in (2, 6)), parameter)
 
   def test_mount_and_counter_transforms_have_independent_literal_bytes(self):
-    for parameter, expected in ((2, bytes.fromhex('40050000000000f0')),
-                                (6, bytes.fromhex('4005000010000000'))):
+    for parameter, expected in ((2, bytes.fromhex('4005000000000010')),
+                                (6, bytes.fromhex('4005000010000010'))):
       self.setUp()
       self.safety.set_safety_hooks(39, parameter)
       self.safety.safety_rx_hook(self.source(0x398))

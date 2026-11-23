@@ -13,6 +13,8 @@ static uint32_t tesla_preap_engage_ts = 0U;
 static bool tesla_preap_pending_physical = false;
 static bool tesla_preap_engage_seen = false;
 static bool tesla_preap_brake_valid = false;
+static bool tesla_preap_brake_msg = true;
+static bool tesla_preap_brake_di = true;
 static bool tesla_preap_eps_fault = true;
 static bool tesla_preap_eps_temporary = false;
 static bool tesla_preap_belt_seen = false;
@@ -125,9 +127,10 @@ static void tesla_preap_optional_rx(const CANPacket_t *msg) {
     if (!ready) {
       controls_allowed = false;
       tesla_preap_clear();
-    } else if (gas_pressed) {
+    } else if (gas_pressed || (tesla_preap_pedal_feedback_state != TESLA_PREAP_PEDAL_STATE_OK)) {
       // Preserve the existing engaged mode through gas override, but require a
-      // real zero/disabled command before any resumed active demand.
+      // real zero/disabled command before any resumed active demand. The same
+      // holds once the interceptor is back in its idle timeout state.
       tesla_preap_pedal_tx_seen = false;
       tesla_preap_pedal_tx_enabled = false;
     } else {
@@ -165,7 +168,7 @@ static void tesla_preap_rx_hook(const CANPacket_t *msg) {
       const int error = msg->data[2] >> 4U;
       tesla_preap_eps_temporary = status == 0;
       tesla_preap_eps_fault = (status >= 3) || (error == 15);
-      steering_disengage = tesla_preap_eps_fault || (hands >= 3) || ((status == 0) && (error >= 6) && (error <= 9));
+      steering_disengage = tesla_preap_eps_fault || (hands >= 2) || ((status == 0) && (error >= 6) && (error <= 9));
     }
     if (msg->addr == 0x155U) {
       const float speed = ((msg->data[5] << 8U) | msg->data[6]) * 0.01F * KPH_TO_MS;
@@ -176,10 +179,16 @@ static void tesla_preap_rx_hook(const CANPacket_t *msg) {
     if (msg->addr == 0x20AU) {
       const unsigned int brake = (msg->data[0] >> 2U) & 3U;
       tesla_preap_brake_valid = (brake == 1U) || (brake == 2U);
-      brake_pressed = brake != 1U;
+      tesla_preap_brake_msg = brake != 1U;
+      brake_pressed = tesla_preap_brake_msg || tesla_preap_brake_di;
       if (!tesla_preap_brake_valid) { tesla_preap_clear(); }
     }
-    if (msg->addr == 0x118U) { tesla_preap_gear = (msg->data[1] >> 4U) & 7U; }
+    if (msg->addr == 0x118U) {
+      tesla_preap_gear = (msg->data[1] >> 4U) & 7U;
+      // DI_brakePedal: second brake source, as in both references. Either source holds brake_pressed.
+      tesla_preap_brake_di = (msg->data[1] & 0x80U) != 0U;
+      brake_pressed = tesla_preap_brake_msg || tesla_preap_brake_di;
+    }
     if (msg->addr == 0x318U) {
       tesla_preap_doors_open = (((msg->data[1] >> 4U) & 3U) != 0U) ||
         (((msg->data[1] >> 6U) & 3U) != 0U) || (((msg->data[2] >> 6U) & 3U) != 0U) ||
@@ -293,7 +302,22 @@ static bool tesla_preap_tx_hook(const CANPacket_t *msg) {
       ((checksum & 0xFFU) != msg->data[3]);
     violation |= (type == 1) && (!tesla_preap_sources_ready(!tesla_preap_axis) || (tesla_preap_gear != 4) ||
       tesla_preap_doors_open || steering_disengage || (brake_pressed && !tesla_preap_axis));
+    // BogPilot's per-frame rate table and absolute cap, applied on top of the vehicle-model limits: the
+    // table is the tighter one at low speed, the model at speed.
+    static const struct lookup_t rate_up = {{2.0F, 7.0F, 17.0F}, {8.0F, 4.0F, 2.5F}};
+    static const struct lookup_t rate_down = {{2.0F, 7.0F, 17.0F}, {9.0F, 5.0F, 4.5F}};
+    const float table_speed = ((float)vehicle_speed.min / VEHICLE_SPEED_FACTOR) - 1.0F;
+    const int delta_up = (int)((safety_interpolate(rate_up, table_speed) * 10.0F) + 1.0F);
+    const int delta_down = (int)((safety_interpolate(rate_down, table_speed) * 10.0F) + 1.0F);
+    const int highest = desired_angle_last + ((desired_angle_last > 0) ? delta_up : delta_down);
+    const int lowest = desired_angle_last - ((desired_angle_last >= 0) ? delta_down : delta_up);
+    bool table_violation = (angle > limits.max_angle) || (angle < -limits.max_angle);
+    if ((type == 1) && lateral_controls_allowed()) { table_violation |= (angle > highest) || (angle < lowest); }
     violation |= steer_angle_cmd_checks_vm(angle, type == 1, limits, vm);
+    if (table_violation) {
+      violation = true;
+      desired_angle_last = SAFETY_CLAMP(angle_meas.values[0], -limits.max_angle, limits.max_angle);
+    }
     accepted = !violation;
   }
   return accepted;
@@ -317,6 +341,8 @@ static safety_config tesla_preap_init(uint16_t param) {
   tesla_preap_radar_ticket = NULL;
   tesla_preap_doors_open = true;
   tesla_preap_brake_valid = false;
+  tesla_preap_brake_msg = true;
+  tesla_preap_brake_di = true;
   tesla_preap_eps_fault = true;
   tesla_preap_gear = 0;
   tesla_preap_lever_previous = 2;

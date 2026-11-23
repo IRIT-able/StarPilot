@@ -8,12 +8,13 @@ class PreAPStream:
     self.dbc = DBC("tesla_can")
 
   def frames(self, tick, *, lever=0, cruise=1, brake=1, gear=4, speed=80.0,
-             doors=0, belt=1, eps_status=1, eps_error=0, hands=0, omit=None, wrong_bus=None):
+             doors=0, belt=1, eps_status=1, eps_error=0, hands=0, omit=None, wrong_bus=None,
+             angle=0, di_brake=0):
     sources = (
-      ("EPAS_sysStatus", {"EPAS_internalSAS": 0, "EPAS_torsionBarTorque": 0,
+      ("EPAS_sysStatus", {"EPAS_internalSAS": angle, "EPAS_torsionBarTorque": 0,
                          "EPAS_eacStatus": eps_status, "EPAS_eacErrorCode": eps_error, "EPAS_handsOnLevel": hands}),
       ("DI_torque1", {"DI_pedalPos": 0, "DI_torqueMotor": 0}),
-      ("DI_torque2", {"DI_gear": gear, "DI_vehicleSpeed": speed}),
+      ("DI_torque2", {"DI_gear": gear, "DI_vehicleSpeed": speed, "DI_brakePedal": di_brake}),
       ("BrakeMessage", {"driverBrakeStatus": brake}),
       ("DI_state", {"DI_cruiseState": cruise, "DI_speedUnits": 1, "DI_digitalSpeed": 80}),
       ("GTW_carState", {name: doors for name in ("DOOR_STATE_FL", "DOOR_STATE_FR", "DOOR_STATE_RL",

@@ -33,14 +33,15 @@ def configure_native(safety, calibration, word, cp_bytes):
   assert not safety.tesla_preap_test_config_word(0, 1), 'car-mode calibration mutation must fail'
 
 
-def feedback_frame(calibration, counter, *, di=0., state=0, wrong_bus=False, bad_channel=False):
+def feedback_frame(calibration, counter, *, di=0., state=0, wrong_bus=False, bad_channel=False,
+                   raw_one=None, raw_two=None, bad_checksum=False):
   physical = calibration.physical(di)
-  one = int((physical - D) / M1)
-  two = int((physical - D) / M2) + (200 if bad_channel else 0)
-  data = struct.pack('>HHB', one, two, ((state & 15) << 4) | (counter & 15)) + b'\x00'
-  # Byte5 feedback checksum was unvalidated/unspecified in the working Dom path.
-  # Do not invent the unrelated generic pedal's CRC in this actual fixture.
-  return 0x552, data, 2 - calibration.bus if wrong_bus else calibration.bus
+  one = int((physical - D) / M1) if raw_one is None else raw_one
+  two = (int((physical - D) / M2) + (200 if bad_channel else 0)) if raw_two is None else raw_two
+  prefix = struct.pack('>HHB', one, two, ((state & 15) << 4) | (counter & 15))
+  # Byte 5 is the interceptor's sum checksum (0x52 + 0x05 + bytes 0..4), valid on every logged frame.
+  checksum = (0x52 + 0x05 + sum(prefix) + (1 if bad_checksum else 0)) & 255
+  return 0x552, prefix + bytes([checksum]), 2 - calibration.bus if wrong_bus else calibration.bus
 
 
 @contextmanager
