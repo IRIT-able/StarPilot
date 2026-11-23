@@ -122,10 +122,11 @@ class PreAPRadarInterface(RadarInterfaceBase):
     if self.radar_off_can:
       self.rcp = None
     else:
-      messages = [(_BOSCH_RADAR_STATUS_MSG, 8), (_BOSCH_RADAR_ALERT_MSG, float('nan'))]
+      # Timeouts as BogPilot (10 periods): status 1.0 s, points 0.625 s. NAP lists both at 8 Hz (1.25 s).
+      messages = [(_BOSCH_RADAR_STATUS_MSG, 10), (_BOSCH_RADAR_ALERT_MSG, float('nan'))]
       for i in range(_BOSCH_RADAR_POINTS):
-        messages.append((_BOSCH_RADAR_POINT_A_BASE + (i * _BOSCH_RADAR_POINT_STRIDE), 8))
-        messages.append((_BOSCH_RADAR_POINT_B_BASE + (i * _BOSCH_RADAR_POINT_STRIDE), 8))
+        messages.append((_BOSCH_RADAR_POINT_A_BASE + (i * _BOSCH_RADAR_POINT_STRIDE), 16))
+        messages.append((_BOSCH_RADAR_POINT_B_BASE + (i * _BOSCH_RADAR_POINT_STRIDE), 16))
       self.radar_message_addresses = frozenset(address for address, _ in messages)
       self.rcp = CANParser(DBC[CP.carFingerprint][Bus.radar], messages, CANBUS.vehicle)
 

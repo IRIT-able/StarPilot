@@ -89,6 +89,19 @@ radar cycles; stale tracks left in radard during silence; silences resetting the
 the following commit, with tests. Known remaining differences from that review: BogPilot's radard `StuckTrackFilter` is not
 ported, and BogPilot drops a slot the radar marks invalid at once where the port (as NAP) holds it for two cycles.
 
+Second review (of `1723915c6`) found two more blocking gaps in surrounding code; both are fixed in the next commit:
+
+| Finding | Fix | Source |
+|---|---|---|
+| Parser timeouts were NAP's (status and points listed at 8 Hz = 1.25 s) where BogPilot's are shorter | Status listed at 10 Hz (1.0 s timeout), points at 16 Hz (0.625 s) | BogPilot `tesla_ap1/radar_interface.py` |
+| BogPilot's `StuckTrackFilter` missing (a track whose range stays within 0.2 m with |vRel| <= 0.13 m/s for 5 s while ego speed changes >= 3 m/s is not a road object) | `car/tesla/preap/radar_filters.py`, copied; applied in radard | BogPilot `tesla_ap1/preap_radar_filters.py` |
+| radard treated held (unmeasured) points as measurements and kept tracks as long as the receiver repeated them | `openpilot/starpilot/car/tesla/preap_radard.py`: NAP's pre-AP radard path. Kalman step from the observed radar interval, unmeasured points skip the filter update, tracks dropped 0.5 s after the last `radarTracks` message, vision-to-track association with distance/lateral/velocity gates and incumbent retention, `radarState` validity independent of the `radarTracks` rate | NAP `openpilot/selfdrive/controls/radard.py` (`_update_preap`, `LeadTrackAssociation`) |
+
+`selfdrive/controls/radard.py` is shared code. The change is one constructor flag (`tesla_preap_radar`, default off) and three
+`elif` branches behind it; `is_preap_radar(CP)` is true only for brand tesla, `TESLA_MODEL_S_PREAP`, radar available.
+Tests: `openpilot/starpilot/car/tesla/tests/test_preap_radard.py` (NAP's eight radard scenarios adapted, plus empty-message
+drop, stuck track withheld end to end, other cars unchanged), `car/tesla/tests/test_preap_radar_stuck_tracks.py` (BogPilot's).
+
 Open: BogPilot shows a `preapRadarNotReady` warning while the gate is closed. The gate state is available on the interface
 (`RI.preap.gate.status()`), but no StarPilot alert is wired to it yet.
 
