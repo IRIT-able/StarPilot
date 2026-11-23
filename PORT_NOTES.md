@@ -9,8 +9,20 @@ Bosch radar retrofit on bus 1 fed by the panda, newer SCCM retrofit.
 |---|---|---|
 | Base | `StarPilotHQ/StarPilot` `testing` @ `0db704125` | Branch point. PRs target `testing`; it was 32 commits ahead of `stable`. |
 | Primary | `NotAutopilot/openpilot` `naponsp-alpha` @ `e702d13397`, opendbc `81799e45e`, panda `649a6281f` | The commit named in `naponsp-alpha-prebuilt`'s `build.json`. The prebuilt's first commit (`5813362a4e`) has an opendbc tree identical to this pin. |
-| Primary, device delta | `naponsp-alpha-prebuilt` @ `7eb09d2a7` | Six source-form commits on top of the build: upside-down radar option, MADS "wait for initial lateral permission", pedal calibration fixes, VIN-learn tool. Driving-relevant ones are ported and listed separately below. |
+| Primary, device delta | `naponsp-alpha-prebuilt` @ `7eb09d2a7` | Five source-form commits on top of the build. Two are driving-relevant and neither is ported; see "NAP prebuilt-only changes". |
 | Secondary | `IRIT-able/bogpilot-openpilot` `fix/preap-all` @ `9ed906a641` | Used to fill gaps and wherever it is stricter. The only branch with real drives on this car. |
+
+## NAP prebuilt-only changes (`5813362a4..7eb09d2a7`)
+
+| Commit | Change | Driving-relevant | In the port |
+|---|---|---|---|
+| `04c113384`, `757af40a3`, `c4739e370` | Upside-down radar option: `yRel` and `yvRel` negated when `/data/nap_params.json` has `radar_upside_down`; JSON re-read on change; reboot prompt in the UI | Yes, if the radar is mounted upside down | **No.** BogPilot `9ed906a641` has no such option and its logged drives on this car show radar leads matched to camera leads, so this radar is mounted the normal way up. |
+| `2588137b8` | MADS waits up to 200 control samples (about 2 s) for the panda's first lateral grant before giving up; a loss after the grant is still immediate | Yes: first-pull engagement | **No direct port.** MADS does not exist here. StarPilot's equivalent wait is 200 ms (`car/tesla/preap/aol.py` `native_observation`), unchanged. If the first pull ever fails to engage on the car, this is the number to compare. |
+| `04c113384` | Pedal calibration tool fix (`calibrate_pedal.py`: interceptor state only checked in one phase), panda heartbeat in the tool transport | No (offroad tool) | No. StarPilot has no calibration tool; it reads `NAPPedalCalibFactor` / `NAPPedalCalibZero`. |
+| `04c113384`, merge `7eb09d2a7` | Radar VIN-learn tool (`vin_learn_radar.py`), settings UI | No (offroad tool) | No. |
+| `04c113384` then `5700b9f16` | `qcomgpsd` added to selfdrived's ignored processes, then reverted | No (net zero) | No. |
+
+So the reference for driving behavior is `e702d13397` with no prebuilt-only change carried over.
 
 ## Approach
 
