@@ -7,6 +7,13 @@ M1 = 0.050796813
 M2 = 0.101593626
 D = -22.85856576
 FEEDBACK_TIMEOUT_NS = 500_000_000
+# 0x552 rules, the same as the panda's (safety/modes/tesla_preap_pedal.h): channel agreement around the
+# measured relationship, checksum, counter advance of 1 or 2, interceptor STATE 0 or 5 (idle timeout).
+AGREE_SLOPE = 0.00844
+AGREE_OFFSET = -14.17
+AGREE_TOLERANCE = 4.0 / M1
+STATE_OK = 0
+STATE_IDLE = 5
 
 
 def float32(value):
@@ -92,11 +99,13 @@ class PedalFeedback:
     self.source_ns = 0
     self.last_observed_ns = 0
     self.healthy = False
+    self.state = None
     self.value = self.value2 = 0.
     self.torque_level = 0.
 
   def clear(self):
     self.healthy = False
+    self.state = None
     self.source_ns = 0
     self.last_counter = None
 
@@ -108,16 +117,17 @@ class PedalFeedback:
     self.last_observed_ns = source_ns
     one, two, flags = struct.unpack('>HHB', payload[:5])
     state, counter = flags >> 4, flags & 15
-    # Dom did not define a feedback checksum validator. Do not substitute the
-    # unrelated upstream pedal CRC. Keep state/counter/dual-channel provenance.
     physical_one, physical_two = one * M1 + D, two * M2 + D
-    if (state != 0 or one == 65535 or two == 65535 or
-        abs(physical_one - physical_two) > 2 * M2):
+    # STATE 5 is the interceptor's idle state (no command stream). Whether it is legitimate at this moment
+    # is the panda's call, which knows the accepted command timing; here it only blocks enabled commands.
+    if (checksum(0x552, payload[:5]) != payload[5] or state not in (STATE_OK, STATE_IDLE) or one == 65535 or two == 65535 or
+        abs((one - 2 * two) - (AGREE_SLOPE * one + AGREE_OFFSET)) > AGREE_TOLERANCE):
       self.clear()
       return False
     previous = self.last_counter
     self.last_counter = counter
-    self.healthy = previous is not None and counter == ((previous + 1) & 15)
+    self.healthy = previous is not None and ((counter - previous) & 15) in (1, 2)
+    self.state = state if self.healthy else None
     self.source_ns = source_ns if self.healthy else 0
     self.value = self.calibration.di(physical_one)
     self.value2 = self.calibration.di(physical_two)
@@ -127,5 +137,10 @@ class PedalFeedback:
     return bool(self.healthy and self.source_ns > 0 and self.source_ns <= now_ns and
                 now_ns - self.source_ns <= FEEDBACK_TIMEOUT_NS)
 
+  def commandable(self, now_ns):
+    """The interceptor is out of its idle timeout: an enabled command may follow."""
+    return self.ready(now_ns) and self.state == STATE_OK
+
   def gas_pressed(self):
-    return self.value > 2. or self.value2 > 2.
+    # Channel 1, as both references and the panda. Channel 2 is checked against it in observe().
+    return self.value > 2.

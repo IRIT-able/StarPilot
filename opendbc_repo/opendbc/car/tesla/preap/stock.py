@@ -15,6 +15,30 @@ from opendbc.car.vehicle_model import VehicleModel
 _DOORS = ("DOOR_STATE_FL", "DOOR_STATE_FR", "DOOR_STATE_RL", "DOOR_STATE_RR", "DOOR_STATE_FrontTrunk", "BOOT_STATE")
 
 
+# BogPilot's per-frame steering table and cap, enforced by the panda at (speed - 1 m/s); here at the actual speed,
+# so a command that passes this always passes there.
+_RATE_BP = (2., 7., 17.)
+_RATE_UP = (8., 4., 2.5)
+_RATE_DOWN = (9., 5., 4.5)
+_MAX_ANGLE = 360.
+
+
+def _interp(x, xs, ys):
+  if x <= xs[0]:
+    return ys[0]
+  for i in range(1, len(xs)):
+    if x <= xs[i]:
+      return ys[i - 1] + (x - xs[i - 1]) * (ys[i] - ys[i - 1]) / (xs[i] - xs[i - 1])
+  return ys[-1]
+
+
+def apply_rate_table(angle, previous, speed):
+  up, down = _interp(speed, _RATE_BP, _RATE_UP), _interp(speed, _RATE_BP, _RATE_DOWN)
+  highest = previous + (up if previous > 0 else down)
+  lowest = previous - (down if previous >= 0 else up)
+  return max(-_MAX_ANGLE, min(_MAX_ANGLE, max(lowest, min(highest, angle))))
+
+
 def get_stock_params(ret):
   ret.safetyConfigs = [get_safety_config(structs.CarParams.SafetyModel.teslaPreap, 0)]
   ret.steerLimitTimer = 0.4
@@ -32,7 +56,7 @@ class PreAPStockCarState(CarStateBase):
   def __init__(self, CP):
     super().__init__(CP)
     self.can_define = CANDefine(DBC[CP.carFingerprint][Bus.party])
-    self.engagement = PreAPEngagement(True, 500)
+    self.engagement = PreAPEngagement(True, 400)  # NAP double-pull window
     self.hands_on_level = 0
     self.cruise_buttons = self.prev_cruise_buttons = 0
     self.speed_units = "MPH"
@@ -63,8 +87,10 @@ def update_stock(cs, can_parsers):
   ret.vEgoRaw = cp_chassis.vl["ESP_B"]["ESP_vehicleSpeed"] * CV.KPH_TO_MS
   ret.vEgo, ret.aEgo = cs.update_speed_kf(ret.vEgoRaw)
   ret.gasPressed = cp_pt.vl["DI_torque1"]["DI_pedalPos"] > 2.0
-  real_brake_pressed = cp_chassis.vl["BrakeMessage"]["driverBrakeStatus"] == 2
-  ret.brakePressed = cp_chassis.vl["BrakeMessage"]["driverBrakeStatus"] != 1
+  # Two brake sources, as both references and the panda: the brake switch message and the drive inverter's bit.
+  di_brake = cp_chassis.vl["DI_torque2"]["DI_brakePedal"] == 1
+  real_brake_pressed = di_brake or cp_chassis.vl["BrakeMessage"]["driverBrakeStatus"] == 2
+  ret.brakePressed = di_brake or cp_chassis.vl["BrakeMessage"]["driverBrakeStatus"] != 1
 
   epas_status = cp_chassis.vl["EPAS_sysStatus"]
   cs.hands_on_level = epas_status["EPAS_handsOnLevel"]
@@ -78,7 +104,7 @@ def update_stock(cs, can_parsers):
   ret.steerFaultTemporary = eac_status == "EAC_INHIBITED"
 
   eac_error_code = cs.can_define.dv["EPAS_sysStatus"]["EPAS_eacErrorCode"].get(int(epas_status["EPAS_eacErrorCode"]), None)
-  ret.steeringDisengage = cs.hands_on_level >= 3 or (eac_status == "EAC_INHIBITED" and eac_error_code in (
+  ret.steeringDisengage = cs.hands_on_level >= 2 or (eac_status == "EAC_INHIBITED" and eac_error_code in (
     "EAC_ERROR_HIGH_ANGLE_REQ", "EAC_ERROR_HIGH_ANGLE_RATE_REQ", "EAC_ERROR_HIGH_ANGLE_SAFETY", "EAC_ERROR_HIGH_ANGLE_RATE_SAFETY",
   ))
   if eac_error_code is None or eac_error_code == "SNA":
@@ -105,9 +131,11 @@ def update_stock(cs, can_parsers):
 
   ret.cruiseState.available = use_pedal or cruise_state in ("STANDBY", "ENABLED", "STANDSTILL", "OVERRIDE", "PRE_FAULT", "PRE_CANCEL")
   if speed_units == "KPH":
-    ret.cruiseState.speed = max(cp_chassis.vl["DI_state"]["DI_digitalSpeed"] * CV.KPH_TO_MS, 1e-3)
+    ret.vEgoCluster = cp_chassis.vl["DI_state"]["DI_digitalSpeed"] * CV.KPH_TO_MS
+    ret.cruiseState.speed = max(ret.vEgoCluster, 1e-3)
   elif speed_units == "MPH":
-    ret.cruiseState.speed = max(cp_chassis.vl["DI_state"]["DI_digitalSpeed"] * CV.MPH_TO_MS, 1e-3)
+    ret.vEgoCluster = cp_chassis.vl["DI_state"]["DI_digitalSpeed"] * CV.MPH_TO_MS
+    ret.cruiseState.speed = max(ret.vEgoCluster, 1e-3)
   ret.cruiseState.standstill = False
   ret.standstill = ret.vEgoRaw < 0.1
   ret.accFaulted = cruise_state == "FAULT" or (use_pedal and not feedback_ready)
@@ -197,7 +225,7 @@ class PreAPStockCarController(CarControllerBase):
       actuators.steeringAngleDeg = 0.0
       self.frame += 1
       return actuators, sends
-    lat_active = CC.latActive and CS.hands_on_level < 3 and CS.preap_lateral_authorized
+    lat_active = CC.latActive and CS.hands_on_level < 2 and CS.preap_lateral_authorized
     # Pedal ownership requires cancelling OEM cruise on every active cycle.
     # Its physical cancel edge is handled by PreAPEngagement instead.
     if self.pedal_control is None and CC.cruiseControl.cancel and CS.cruiseEnabled:
@@ -209,8 +237,11 @@ class PreAPStockCarController(CarControllerBase):
       CS.engagement.pedal_speed_kph = 0.0
     if self.frame % 2 == 0:
       requested = max(CS.out.steeringAngleDeg - 20.0, min(CS.out.steeringAngleDeg + 20.0, CC.actuators.steeringAngleDeg))
+      previous_angle = self.apply_angle_last
       self.apply_angle_last = apply_steer_angle_limits_vm(requested, self.apply_angle_last, CS.out.vEgoRaw,
         CS.out.steeringAngleDeg, lat_active, CarControllerParams, self.VM)
+      if lat_active:
+        self.apply_angle_last = apply_rate_table(self.apply_angle_last, previous_angle, CS.out.vEgoRaw)
       sends.append(self.codec.create_steering_control((self.frame // 2) % 16, self.apply_angle_last, lat_active))
       sends.append(self.codec.create_epas_control((self.frame // 2) % 16, 1))
     CS.pccEvent = None

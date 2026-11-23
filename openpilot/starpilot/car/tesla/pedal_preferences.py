@@ -1,4 +1,5 @@
 """One complete frozen snapshot of the working Dom Pre-AP pedal settings."""
+import math
 from dataclasses import dataclass
 from opendbc.car.tesla.preap.pedal_contract import PedalCalibration, float32
 from openpilot.starpilot.saved_source import read_saved
@@ -34,7 +35,11 @@ def read_pedal_settings(params):
       return PedalSettings(enabled=True, valid=False)
     factor = float32(float(raw['NAPPedalCalibFactor'] if raw['NAPPedalCalibFactor'] is not None else b'1.0'))
     zero = float32(float(raw['NAPPedalCalibZero'] if raw['NAPPedalCalibZero'] is not None else b'0.0'))
-    calibration = PedalCalibration(factor, zero, 0 if bus_raw == b'0' else 2)
+    # Both references: the saved zero is the gas-onset point; 0 DI (coast) is one DI unit below it. They also
+    # do not trust a calibration still at its default values (NAP).
+    if (factor == 1.0 and zero == 0.0) or not math.isfinite(factor) or abs(factor) <= 1e-6:
+      return PedalSettings(enabled=True, valid=False)
+    calibration = PedalCalibration(factor, float32(zero - 1.0 / factor), 0 if bus_raw == b'0' else 2)
     if not calibration.valid():
       return PedalSettings(enabled=True, valid=False)
     try:

@@ -44,6 +44,8 @@ class PreAPEngagement:
     self.preap_cc_cancel_needed = False
     self.preap_cc_engage_needed = False
     button_events: list[structs.CarState.ButtonEvent] = []
+    # NAP: a pull with the brake held gives lateral only.
+    long_control_allowed = long_control_allowed and (not use_pedal or not real_brake_pressed)
 
     if cruise_buttons == CruiseButtons.MAIN and prev_cruise_buttons != CruiseButtons.MAIN:
       self.lateralEnabled = True
@@ -65,8 +67,8 @@ class PreAPEngagement:
     if self.pending_enable and (curr_time_ms - self.stalk_pull_time_ms > self.double_pull_window_ms):
       self.pending_enable = False
 
-    brake_rising_edge = real_brake_pressed and not self.preap_brake_pressed_prev
-    if use_pedal and brake_rising_edge and self.cruiseEnabled and self.enableLongControl:
+    # NAP: the brake level, not its edge, drops pedal cruise; getting it back needs a new double pull.
+    if use_pedal and real_brake_pressed and self.cruiseEnabled and self.enableLongControl:
       self.enableLongControl = False
       self.enableJustCC = True
       self.pending_enable = False
@@ -96,7 +98,7 @@ class PreAPEngagement:
     self.pending_enable = False
     self.enableLongControl = long_control_allowed if double_pull else False
     self.enableJustCC = not self.enableLongControl
-    self.pedal_speed_kph = self._capture_target_speed(v_ego, speed_units) if pedal_long_allowed and double_pull else 0.0
+    self.pedal_speed_kph = self._capture_target_speed(v_ego, speed_units) if pedal_long_allowed and self.enableLongControl else 0.0
 
     if double_pull:
       if not use_pedal:

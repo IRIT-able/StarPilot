@@ -60,7 +60,7 @@ def actual_pedal_startup(bus, radar_mode, release, monkeypatch):
       params.put_bool(key, value, block=True)
     params.put('NAPPedalCanBus', bus, block=True)
     params.put('NAPPedalCalibFactor', 1.0, block=True)
-    params.put('NAPPedalCalibZero', 0.0, block=True)
+    params.put('NAPPedalCalibZero', 1.0, block=True)  # saved gas-onset point; 0 DI is one unit below it
     params.put('TeslaPreAPRadarConfig', {'version': 1, 'mode': radar_mode, 'offset': .25}, block=True)
     observed = (CAR.TESLA_MODEL_S_PREAP, fingerprint, '0' * 17, [], structs.CarParams.FingerprintSource.can, True)
     with patch.object(car_helpers, 'fingerprint', return_value=observed), \
