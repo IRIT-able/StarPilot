@@ -33,3 +33,10 @@ def test_implausible_calibration_is_refused(monkeypatch, factor, zero):
   # BogPilot: factor 0.82-3.0, and a resting pedal below the command cap.
   result = settings(monkeypatch, factor, zero)
   assert result.enabled and not result.valid
+
+
+def test_saved_onset_at_the_command_limit_is_refused(monkeypatch):
+  # raw 2450 is 101.6 physical units: the saved onset itself must be below it (BogPilot), not only the coast point.
+  assert settings(monkeypatch, b'1.0', b'101.0').valid
+  assert not settings(monkeypatch, b'1.0', b'101.7').valid
+  assert not settings(monkeypatch, b'1.0', b'102.3').valid

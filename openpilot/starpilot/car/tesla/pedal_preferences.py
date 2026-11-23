@@ -41,7 +41,8 @@ def read_pedal_settings(params):
     if (factor == 1.0 and zero == 0.0) or not math.isfinite(factor) or not 0.82 <= factor <= 3.0:
       return PedalSettings(enabled=True, valid=False)
     calibration = PedalCalibration(factor, float32(zero - 1.0 / factor), 0 if bus_raw == b'0' else 2)
-    if not calibration.valid() or (calibration.physical(0.) - D) / M1 >= MAX_ENABLED_RAW:
+    # BogPilot tests the saved onset point itself against the command limit.
+    if not calibration.valid() or (zero - D) / M1 >= MAX_ENABLED_RAW:
       return PedalSettings(enabled=True, valid=False)
     try:
       personality_raw, personality_valid = read_saved(params, 'LongitudinalPersonality', 64)

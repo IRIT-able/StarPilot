@@ -259,7 +259,7 @@ def test_enabled_command_never_exceeds_the_panda_cap_and_first_command_stays_nea
   real = car.pc.codec.command
   car.pc.codec.command = lambda di=0., *, enabled=False: (seen.append(di) if enabled else None) or real(di, enabled=enabled)
   car.step(8)
-  assert seen and seen[0] <= car.fb.value + 5.0
+  assert seen and seen[0] <= car.fb.value + 3.9 + 1e-6, 'seed + 3.0 and one ramp step of 0.9: a full DI under the panda limit'
 
 
 def test_any_brake_status_other_than_released_drops_pedal_cruise():
@@ -270,3 +270,17 @@ def test_any_brake_status_other_than_released_drops_pedal_cruise():
   # stock.py passes the published brakePressed: DI_brakePedal, or a brake status that is anything but "not applied".
   fsm.process_buttons(0, 0, 1400, 20., "MPH", True, True, True, True)
   assert not fsm.enableLongControl
+
+
+def test_failure_stays_visible_for_a_second_and_needs_the_request_gone():
+  car = engaged_car()
+  car.echo = False
+  car.step(40)
+  assert car.cs.pedal_command_failed
+  car.cs.cruiseEnabled = car.cs.enableLongControl = False       # carstate resets the engagement at once
+  car.step(50)
+  assert car.cs.pedal_command_failed, 'still a fault half a second later'
+  car.step(60)
+  assert not car.cs.pedal_command_failed and not car.pc.failed
+  car.echo = True
+  assert car.step(50) == [], 'and nothing resumes without a new pull'

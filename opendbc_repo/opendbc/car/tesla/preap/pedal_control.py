@@ -92,7 +92,9 @@ def _finite(*values):
     return False
 
 
-FIRST_COMMAND_MAX_ABOVE_FEEDBACK = 4.0   # DI; the panda allows +5 on the first enabled frame, the ramp adds up to 0.9
+FIRST_COMMAND_MAX_ABOVE_FEEDBACK = 3.0   # DI; the panda allows +5 on the first enabled frame, the ramp adds up to 0.9,
+                                         # and its newest feedback frame can differ from ours by sensor noise
+FAILURE_HOLD_NS = 1_000_000_000          # the fault stays visible this long, whatever the engagement does
 ACQUIRE_MAX_FRAMES = 10                  # 200 ms of disabled frames without the interceptor leaving its timeout state
 ECHO_TIMEOUT_NS = 100_000_000
 
@@ -106,7 +108,8 @@ class PreAPPedalControl:
     self.was_active = False
     self.sending = False
     self.primed = False          # a disabled frame went out since pedal cruise was last wanted
-    self.failed = False          # latched until the request goes away (NAP)
+    self.failed = False          # latched until the request goes away (NAP), and for at least FAILURE_HOLD_NS
+    self.failed_ns = -FAILURE_HOLD_NS
     self.acquire_frames = 0
     self.enabled_since_ns = None
     self.engage_frame = -1_000_000
@@ -145,6 +148,7 @@ class PreAPPedalControl:
     # NAP: a failed command or takeover latches until the request is dropped; it is not retried 20 ms later.
     # StarPilot treats pedal loss as a longitudinal fault of the whole engagement (carstate reads the flag).
     self.failed = True
+    self.failed_ns = now_ns
     self.was_active = False
     CS.pedal_command_failed = True
     release = self.sending
@@ -165,7 +169,7 @@ class PreAPPedalControl:
     feedback = CS.pedal_feedback
     healthy = feedback is not None and feedback.ready(now_ns)
     requested = bool(healthy and CS.cruiseEnabled and CS.enableLongControl)
-    if not (CS.cruiseEnabled and CS.enableLongControl):
+    if not (CS.cruiseEnabled and CS.enableLongControl) and now_ns - self.failed_ns > FAILURE_HOLD_NS:
       self.failed = False
       CS.pedal_command_failed = False
     try:
