@@ -16,6 +16,9 @@ MIN_RAW_ONE = 300
 MIN_RAW_TWO = 150
 STATE_OK = 0
 STATE_IDLE = 5
+STATE_SETTLE_NS = 100_000_000
+# Enabled commands stay below the panda's absolute cap (raw 2500) with BogPilot's margin.
+MAX_ENABLED_RAW = 2450
 
 
 def float32(value):
@@ -85,6 +88,8 @@ class PedalCodec:
       physical = self.calibration.physical(di)
       one = max(0, min(65534, int((physical - D) / M1)))
       two = max(0, min(65534, int((physical - D) / M2)))
+      if one > MAX_ENABLED_RAW:
+        one, two = MAX_ENABLED_RAW, MAX_ENABLED_RAW // 2
       if not 0 <= one <= 65534 or not 0 <= two <= 65534 or abs(one - 2 * two) > 1:
         raise ValueError('invalid dual-channel Tesla pedal command')
     prefix = struct.pack('>HHB', one, two, (int(enabled) << 7) | self.counter)
@@ -104,6 +109,28 @@ class PedalFeedback:
     self.state = None
     self.value = self.value2 = 0.
     self.torque_level = 0.
+    # What this side last sent, to judge STATE 5 exactly as the panda does, and the panda's echo of it.
+    self.tx_enabled = False
+    self.tx_last_ns = self.tx_stream_ns = None
+    self.echo_ns = 0
+
+  def note_tx(self, enabled, now_ns):
+    if self.tx_last_ns is None or now_ns - self.tx_last_ns > STATE_SETTLE_NS:
+      self.tx_stream_ns = now_ns
+    self.tx_last_ns = now_ns
+    self.tx_enabled = bool(enabled)
+
+  def note_echo(self, now_ns):
+    self.echo_ns = now_ns
+
+  def _state_valid(self, state, now_ns):
+    if state == STATE_OK:
+      return True
+    if state != STATE_IDLE:
+      return False
+    commanding = (self.tx_last_ns is not None and now_ns - self.tx_last_ns <= STATE_SETTLE_NS and
+                  now_ns - self.tx_stream_ns > STATE_SETTLE_NS)
+    return not self.tx_enabled and not commanding
 
   def clear(self):
     self.healthy = False
@@ -120,9 +147,8 @@ class PedalFeedback:
     one, two, flags = struct.unpack('>HHB', payload[:5])
     state, counter = flags >> 4, flags & 15
     physical_one, physical_two = one * M1 + D, two * M2 + D
-    # STATE 5 is the interceptor's idle state (no command stream). Whether it is legitimate at this moment
-    # is the panda's call, which knows the accepted command timing; here it only blocks enabled commands.
-    if (checksum(0x552, payload[:5]) != payload[5] or state not in (STATE_OK, STATE_IDLE) or one == 65535 or two == 65535 or
+    # STATE 5 is the interceptor's idle state: valid only while nothing is being commanded, as in the panda.
+    if (checksum(0x552, payload[:5]) != payload[5] or not self._state_valid(state, source_ns) or one == 65535 or two == 65535 or
         one < MIN_RAW_ONE or two < MIN_RAW_TWO or
         abs((one - 2 * two) - (AGREE_SLOPE * one + AGREE_OFFSET)) > AGREE_TOLERANCE):
       self.clear()

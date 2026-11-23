@@ -67,7 +67,8 @@ class _Controller:
 @pytest.fixture
 def controller_env():
   # Healthy, commandable interceptor feedback (NAP: available and STATE == 0).
-  feedback = SimpleNamespace(ready=lambda _now_ns: True, commandable=lambda _now_ns: True,
+  feedback = SimpleNamespace(ready=lambda _now_ns: True, commandable=lambda _now_ns: True, state=0,
+      note_tx=lambda _enabled, _now_ns: None, echo_ns=2 ** 62,
                              value=0.0, torque_level=0.0)
   cs = SimpleNamespace(
     cruiseEnabled=False,

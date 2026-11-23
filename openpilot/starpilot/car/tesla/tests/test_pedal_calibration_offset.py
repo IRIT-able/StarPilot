@@ -12,7 +12,7 @@ def settings(monkeypatch, factor, zero):
   return read_pedal_settings(None)
 
 
-@pytest.mark.parametrize('factor,zero', [(b'1.25', b'24.5'), (b'0.8', b'30.0'), (b'2.0', b'1.0')])
+@pytest.mark.parametrize('factor,zero', [(b'1.25', b'24.5'), (b'0.9', b'30.0'), (b'2.0', b'1.0')])
 def test_zero_is_onset_minus_one_di(monkeypatch, factor, zero):
   result = settings(monkeypatch, factor, zero)
   assert result.valid and result.enabled
@@ -24,4 +24,12 @@ def test_zero_is_onset_minus_one_di(monkeypatch, factor, zero):
 
 def test_default_calibration_values_are_not_trusted(monkeypatch):
   result = settings(monkeypatch, b'1.0', b'0.0')
+  assert result.enabled and not result.valid
+
+
+@pytest.mark.parametrize('factor,zero', [(b'0.8', b'30.0'), (b'3.1', b'1.0'), (b'-1.0', b'100.0'), (b'nan', b'1.0'), (b'0', b'1.0'),
+                                         (b'1.0', b'120.0')])
+def test_implausible_calibration_is_refused(monkeypatch, factor, zero):
+  # BogPilot: factor 0.82-3.0, and a resting pedal below the command cap.
+  result = settings(monkeypatch, factor, zero)
   assert result.enabled and not result.valid

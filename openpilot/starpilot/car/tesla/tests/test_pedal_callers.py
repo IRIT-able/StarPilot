@@ -31,6 +31,7 @@ def test_real_selected_pedal_fault_withdrawal_and_physical_reengagement(bus, rad
     receipt = None
     selfdriven, observed, diagnostics = {}, {}, {}
     alerts_seen = set()
+    echoes = []
     try:
       for tick in range(310):
         now = 2_000_000_000 + tick * 10_000_000
@@ -50,6 +51,9 @@ def test_real_selected_pedal_fault_withdrawal_and_physical_reengagement(bus, rad
         safety.set_aol_test_heartbeat(bool(card.aol_card_intent.allowed_latch or sd.enabled))
         for address, data, source in incoming:
           safety.safety_rx_hook(libsafety_py.make_CANPacket(address, source, data))
+        # The panda returns every 0x551 frame it accepted and sent (source bus + 128); the car watches for that.
+        incoming.extend(echoes)
+        echoes = []
         safety.safety_tick()
         peers = []
         cc = messaging.new_message('carControl', valid=True, logMonoTime=now)
@@ -138,6 +142,7 @@ def test_real_selected_pedal_fault_withdrawal_and_physical_reengagement(bus, rad
           assert safety.safety_tx_hook(libsafety_py.make_CANPacket(address, source, data)), (fault, tick, hex(address), data.hex())
           if address == 0x551:
             assert source == bus and len(data) == 6
+            echoes.append((address, data, source + 128))
             enabled_pedal |= bool(data[4] & 128)
         assert not command.longActive or bool(mask & 2)
         assert not enabled_pedal or command.longActive

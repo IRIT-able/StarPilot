@@ -1328,7 +1328,8 @@ class TestVDASDomainBoundaries:
                           steerFaultPermanent=False, steeringDisengage=False),
       cruise_buttons=0,
       prev_cruise_buttons=0,
-      pedal_feedback=SimpleNamespace(ready=lambda _now_ns: True, commandable=lambda _now_ns: True,
+      pedal_feedback=SimpleNamespace(ready=lambda _now_ns: True, commandable=lambda _now_ns: True, state=0,
+      note_tx=lambda _enabled, _now_ns: None, echo_ns=2 ** 62,
                                      value=0.0, torque_level=0.0),
       preap_accel_max=0.9,
       pccEvent=None,
@@ -1340,12 +1341,23 @@ class TestVDASDomainBoundaries:
     assert controller.vdas.a_ego_filter.x == pytest.approx(0.0)
     assert controller.vdas.prev_a_ego_filtered == pytest.approx(0.0)
 
+    # NAP seeds the estimator with the measured acceleration when the first update is the engage itself. The port
+    # always sends a disabled frame first and observes during it, so the estimator is already running at engage
+    # (NAP's own behavior once it has observed): it must continue from there without a jump, and the commanded
+    # acceleration still starts from zero.
     cc.longActive = True
     controller.update(cc, cs, 2, 0)
+    warm = controller.vdas.a_ego_filter.x
+    assert 0.0 < warm < measured_acceleration
+    controller.update(cc, cs, 4, 0)
 
-    assert controller.vdas.a_ego_filter.x == pytest.approx(measured_acceleration)
-    assert controller.vdas.prev_a_ego_filtered == pytest.approx(measured_acceleration)
+    assert warm < controller.vdas.a_ego_filter.x < measured_acceleration
     assert controller.vdas.jerk_limiter.a_limited == pytest.approx(0.0)
+    # The cold-start seeding itself is still NAP's:
+    cold = VirtualDAS(dt=0.02)
+    cold.reset(measured_accel=measured_acceleration, commanded_accel=0.0, preserve_grade=True)
+    assert cold.a_ego_filter.x == pytest.approx(measured_acceleration)
+    assert cold.prev_a_ego_filtered == pytest.approx(measured_acceleration)
 
   def test_preserved_grade_reset_keeps_acceleration_filter_in_net_domain(self):
     import math

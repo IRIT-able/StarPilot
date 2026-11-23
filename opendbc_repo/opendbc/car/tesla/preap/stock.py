@@ -66,6 +66,7 @@ class PreAPStockCarState(CarStateBase):
     self.di_cruise_state = "OFF"
     self.pccEvent = None
     self.pedal_feedback = None
+    self.pedal_command_failed = False
     self.pedal_personality = 1
     self.preap_accel_max = .3
     self.preap_lateral_authorized = False
@@ -120,7 +121,9 @@ def update_stock(cs, can_parsers):
   from opendbc.car.tesla.preap.pedal_profile import qualified as pedal_qualified, accel_max
   use_pedal = pedal_qualified(cs.CP)
   feedback = cs.pedal_feedback
-  feedback_ready = use_pedal and feedback is not None and feedback.ready(cp_chassis._last_update_nanos)
+  # A latched pedal command failure counts as lost feedback: longitudinal fault, engagement reset, new pull needed.
+  feedback_ready = (use_pedal and feedback is not None and feedback.ready(cp_chassis._last_update_nanos) and
+                    not cs.pedal_command_failed)
   if use_pedal:
     ret.gasPressed = bool(feedback is not None and feedback.gas_pressed())
     if feedback is not None:
@@ -175,7 +178,7 @@ def update_stock(cs, can_parsers):
   curr_time_ms = cp_chassis._last_update_nanos // 1_000_000
   ret.buttonEvents = cs.engagement.process_buttons(
     cs.cruise_buttons, cs.prev_cruise_buttons, curr_time_ms, ret.vEgo, cs.speed_units,
-    use_pedal, pedal_long_allowed, long_control_allowed, real_brake_pressed, cs.di_cruise_state,
+    use_pedal, pedal_long_allowed, long_control_allowed, ret.brakePressed, cs.di_cruise_state,
   )
 
   can_engage = cs.engagement.check_can_engage(ret.doorOpen, ret.gearShifter, ret.seatbeltUnlatched)

@@ -78,15 +78,17 @@ class Car:
                                doorOpen=False, steerFaultPermanent=False, steeringDisengage=False, vEgo=20., aEgo=0.)
     self.cs = SimpleNamespace(pedal_feedback=self.fb, cruiseEnabled=False, enableLongControl=False, out=self.out,
                               cruise_buttons=0, prev_cruise_buttons=0, preap_cc_cancel_needed=False, preap_accel_max=1.,
-                              pccEvent=None)
+                              pccEvent=None, pedal_command_failed=False)
     self.long_active = False
+    self.echo = True
+    self.stuck_idle = False
     self.wire = []
 
   def step(self, n=1):
     sent = []
     for _ in range(n):
       if self.frame_no % 2 == 0:
-        state = 0 if self.last_tx is not None and self.now - self.last_tx <= 200_000_000 else 5
+        state = 0 if self.last_tx is not None and self.now - self.last_tx <= 200_000_000 and not self.stuck_idle else 5
         self.fb.observe(frame(self.counter, state=state), 2, self.now)
         self.counter += 1
       cc = SimpleNamespace(enabled=True, longActive=self.long_active, orientationNED=[0., 0., 0.],
@@ -94,6 +96,8 @@ class Car:
       out = self.pc.update(cc, self.cs, self.frame_no, self.now)
       for _, data, _ in out:
         self.last_tx = self.now
+        if self.echo:
+          self.fb.note_echo(self.now)   # the panda returns every frame it accepted
         sent.append('en' if data[4] & 0x80 else 'dis')
         if not data[4] & 0x80:
           assert data[:4] == bytes(4)
@@ -133,7 +137,8 @@ def test_driver_gas_or_brake_silences_the_pedal_and_stock_cruise_is_cancelled_on
   car.out.gasPressed = True
   assert car.step(2) == ['dis'] and car.step(50) == []
   car.out.gasPressed = False
-  assert car.step(2) == ['dis'] and 'en' in car.step(6)
+  assert car.step(2) == ['dis'], 'a disabled frame first after every override: the panda needs it again'
+  assert 'en' in car.step(6)
   car.cs.preap_cc_cancel_needed = False
   car.cs.prev_cruise_buttons, car.cs.cruise_buttons = 0, 2      # any non-idle stalk press
   car.step(2)
@@ -181,3 +186,87 @@ def test_button_event_types_unchanged():
   fsm = PreAPEngagement(True, 400)
   events = fsm.process_buttons(2, 0, 1000, 20., "MPH", True, True, True, False)
   assert [e.type for e in events] == [structs.CarState.ButtonEvent.Type.setCruise]
+
+
+def engaged_car():
+  car = Car()
+  car.step(20)
+  car.cs.cruiseEnabled = car.cs.enableLongControl = True
+  car.long_active = True
+  car.step(20)
+  assert car.wire[-1] == 'en'
+  return car
+
+
+def test_interceptor_that_never_leaves_its_timeout_state_fails_the_takeover_and_latches():
+  car = Car()
+  car.step(20)
+  car.cs.cruiseEnabled = car.cs.enableLongControl = True
+  car.long_active = True
+  car.stuck_idle = True
+  sent, unhealthy = [], False
+  for _ in range(60):
+    sent += car.step(1)
+    unhealthy = unhealthy or not car.fb.ready(car.now) or car.cs.pedal_command_failed
+    if unhealthy:
+      car.cs.cruiseEnabled = car.cs.enableLongControl = False   # what carstate does on lost feedback or the failure flag
+  # STATE 5 with a command stream running for more than 100 ms is unhealthy feedback, exactly as in the panda.
+  assert 'en' not in sent and unhealthy and 0 < sent.count('dis') <= 12
+  assert car.step(100) == []
+
+
+def test_state5_after_an_enabled_command_is_unhealthy_on_the_car_side_too():
+  car = engaged_car()
+  car.last_tx = None                                             # interceptor falls back to its timeout state while commanded
+  car.step(2)
+  assert not car.fb.healthy and not car.fb.ready(car.now)
+
+
+def test_blocked_commands_are_noticed_through_the_missing_echo():
+  car = engaged_car()
+  car.echo = False
+  sent = car.step(40)
+  assert car.cs.pedal_command_failed
+  assert sent.count('en') <= 8 and sent[-1] == 'dis' and car.step(50) == []
+
+
+def test_command_error_latches_instead_of_retrying():
+  car = engaged_car()
+  car.pc.vdas.update = lambda *a, **k: (_ for _ in ()).throw(RuntimeError('boom'))
+  assert car.step(2) == ['dis']
+  assert car.cs.pedal_command_failed and car.step(50) == []
+
+
+def test_non_finite_input_latches():
+  car = engaged_car()
+  car.out.aEgo = float('nan')
+  assert car.step(2) == ['dis'] and car.cs.pedal_command_failed and car.step(20) == []
+
+
+def test_enabled_command_never_exceeds_the_panda_cap_and_first_command_stays_near_the_measured_pedal():
+  from opendbc.car.tesla.preap.pedal_contract import MAX_ENABLED_RAW, PedalCodec
+  codec = PedalCodec(PedalCalibration(1., 30., 2))                # 90 DI would be raw 2812
+  for di in (0., 50., 80., 90.):
+    _, data, _ = codec.command(di, enabled=True)
+    one, two = struct.unpack('>HH', data[:4])
+    assert one <= MAX_ENABLED_RAW and 0 <= one - 2 * two <= 1
+  car = Car()
+  car.step(20)
+  car.pc.zero_torque.get = lambda v: 30.                          # learned coast point far above the resting pedal
+  car.cs.cruiseEnabled = car.cs.enableLongControl = True
+  car.long_active = True
+  seen = []
+  real = car.pc.codec.command
+  car.pc.codec.command = lambda di=0., *, enabled=False: (seen.append(di) if enabled else None) or real(di, enabled=enabled)
+  car.step(8)
+  assert seen and seen[0] <= car.fb.value + 5.0
+
+
+def test_any_brake_status_other_than_released_drops_pedal_cruise():
+  fsm = PreAPEngagement(True, 400)
+  pull(fsm, 1000, False)
+  pull(fsm, 1300, False)
+  assert fsm.enableLongControl
+  # stock.py passes the published brakePressed: DI_brakePedal, or a brake status that is anything but "not applied".
+  fsm.process_buttons(0, 0, 1400, 20., "MPH", True, True, True, True)
+  assert not fsm.enableLongControl

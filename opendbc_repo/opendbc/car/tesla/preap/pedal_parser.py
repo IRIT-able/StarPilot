@@ -16,4 +16,7 @@ class PedalCANParser(CANParser):
       for address, payload, bus in frames:
         if address == 0x552 and bus == self.feedback.calibration.bus:
           self.feedback.observe(bytes(payload), bus, int(stamp))
+        elif address == 0x551 and bus == self.feedback.calibration.bus + 128:
+          # The panda returns every 0x551 frame it accepted and sent; a blocked frame never comes back.
+          self.feedback.note_echo(int(stamp))
     return super().update(strings, sendcan)

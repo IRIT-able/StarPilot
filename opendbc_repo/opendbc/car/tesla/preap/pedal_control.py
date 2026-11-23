@@ -3,7 +3,7 @@ import math
 
 import numpy as np
 
-from opendbc.car.tesla.preap.pedal_contract import PedalCodec, pedal_max
+from opendbc.car.tesla.preap.pedal_contract import STATE_OK, PedalCodec, pedal_max
 from opendbc.car.tesla.preap.pedal_dynamics import PEDAL_RAMP_RATE_UP, PedalZeroTorque
 from opendbc.car.tesla.preap.virtual_das import VirtualDAS
 
@@ -92,6 +92,10 @@ def _finite(*values):
     return False
 
 
+FIRST_COMMAND_MAX_ABOVE_FEEDBACK = 4.0   # DI; the panda allows +5 on the first enabled frame, the ramp adds up to 0.9
+ACQUIRE_MAX_FRAMES = 10                  # 200 ms of disabled frames without the interceptor leaving its timeout state
+ECHO_TIMEOUT_NS = 100_000_000
+
 class PreAPPedalControl:
   def __init__(self, calibration):
     self.codec = PedalCodec(calibration)
@@ -101,6 +105,10 @@ class PreAPPedalControl:
     self.was_requested = False
     self.was_active = False
     self.sending = False
+    self.primed = False          # a disabled frame went out since pedal cruise was last wanted
+    self.failed = False          # latched until the request goes away (NAP)
+    self.acquire_frames = 0
+    self.enabled_since_ns = None
     self.engage_frame = -1_000_000
     # Snapshot of max-accel-at-engage-speed; the deterministic ceiling for the grace-period ramp (NAP).
     self.engage_a_max = 0.
@@ -118,10 +126,35 @@ class PreAPPedalControl:
     self.handoff_slew_active = False
     self.regen_decel_monitor.reset()
 
-  def _disabled(self, CC, CS, feedback):
+  def _send(self, feedback, now_ns, di=0., *, enabled=False):
+    command = self.codec.command(di, enabled=enabled)
+    feedback.note_tx(enabled, now_ns)
+    if not enabled:
+      self.enabled_since_ns = None
+    elif self.enabled_since_ns is None:
+      self.enabled_since_ns = now_ns
+    return [command]
+
+  def _disabled(self, CC, CS, feedback, now_ns):
     self.previous_di = 0.
     self._observe(CC, CS, feedback)
-    return [self.codec.command(enabled=False)]
+    self.primed = True
+    return self._send(feedback, now_ns)
+
+  def _fail(self, CC, CS, feedback, now_ns):
+    # NAP: a failed command or takeover latches until the request is dropped; it is not retried 20 ms later.
+    # StarPilot treats pedal loss as a longitudinal fault of the whole engagement (carstate reads the flag).
+    self.failed = True
+    self.was_active = False
+    CS.pedal_command_failed = True
+    release = self.sending
+    self.sending = self.primed = False
+    self.previous_di = 0.
+    try:
+      self._observe(CC, CS, feedback)
+    except Exception:
+      pass
+    return self._send(feedback, now_ns) if release else []
 
   def update(self, CC, CS, frame, now_ns):
     if frame % 2:
@@ -132,12 +165,24 @@ class PreAPPedalControl:
     feedback = CS.pedal_feedback
     healthy = feedback is not None and feedback.ready(now_ns)
     requested = bool(healthy and CS.cruiseEnabled and CS.enableLongControl)
+    if not (CS.cruiseEnabled and CS.enableLongControl):
+      self.failed = False
+      CS.pedal_command_failed = False
+    try:
+      return self._update(CC, CS, frame, now_ns, feedback, requested)
+    except Exception:
+      return self._fail(CC, CS, feedback, now_ns) if feedback is not None else []
+
+  def _update(self, CC, CS, frame, now_ns, feedback, requested):
+    requested = requested and not self.failed
     # Wanted and nothing in the way on the car side. While this holds, disabled frames bring the interceptor
     # out of its idle timeout and let the panda grant longitudinal; otherwise nothing is sent at all.
     wanted = bool(requested and CS.out.canValid and not CS.out.canTimeout and
                   not CS.out.gasPressed and not CS.out.brakePressed and not CS.out.accFaulted and
                   not CS.out.doorOpen and not CS.out.steerFaultPermanent and not CS.out.steeringDisengage)
-    active = bool(wanted and CC.enabled and CC.longActive and feedback.commandable(now_ns))
+    # An enabled frame only after a disabled one since pedal cruise was last wanted: the panda forgets its
+    # accepted command state on gas, brake and faults and needs that frame again.
+    active = bool(wanted and self.primed and CC.enabled and CC.longActive and feedback.commandable(now_ns))
     # NAP: the car's own cruise is cancelled when pedal cruise starts or stops and on every stalk press,
     # so a pull with DI cruise armed cannot leave stock cruise driving under the pedal.
     stalk_press = CS.cruise_buttons != CS.prev_cruise_buttons and CS.cruise_buttons != 0
@@ -150,7 +195,8 @@ class PreAPPedalControl:
       # NAP never seeds below the learned coast position; the DI domain clamp is this port's.
       self.engage_frame = frame
       self.handoff_slew_active = True
-      seed = max(feedback.value, self.zero_torque.get(CS.out.vEgo))
+      # The panda checks the first enabled frame against the measured pedal (+5 / -2.5 DI); stay inside that.
+      seed = min(max(feedback.value, self.zero_torque.get(CS.out.vEgo)), feedback.value + FIRST_COMMAND_MAX_ABOVE_FEEDBACK)
       self.previous_di = min(pedal_max(CS.out.vEgo), max(-5., seed))
       self.vdas.reset(measured_accel=CS.out.aEgo, commanded_accel=0., pedal_di_init=self.previous_di,
                       preserve_grade=True)
@@ -159,15 +205,27 @@ class PreAPPedalControl:
     if not wanted:
       # Silent while idle, as logged on this interceptor: one disabled frame to release, then nothing.
       release = self.sending
-      self.sending = False
+      self.sending = self.primed = False
+      self.acquire_frames = 0
       self.previous_di = 0.
-      self._observe(CC, CS, feedback)
-      return [self.codec.command(enabled=False)] if release else []
+      if feedback is not None:
+        self._observe(CC, CS, feedback)
+      return self._send(feedback, now_ns) if release else []
     self.sending = True
-    if not active:
-      return self._disabled(CC, CS, feedback)
     if not finite:
-      return self._disabled(CC, CS, feedback)
+      return self._fail(CC, CS, feedback, now_ns)
+    if not active:
+      # Disabled frames wake the interceptor within 45 ms on this car. One that stays in its timeout state
+      # after ACQUIRE_MAX_FRAMES of them is not going to take commands.
+      self.acquire_frames = self.acquire_frames + 1 if (self.primed and feedback.state != STATE_OK) else 0
+      if self.acquire_frames > ACQUIRE_MAX_FRAMES:
+        return self._fail(CC, CS, feedback, now_ns)
+      return self._disabled(CC, CS, feedback, now_ns)
+    self.acquire_frames = 0
+    # BogPilot: enabled frames the panda does not send back are being blocked; stop instead of commanding blind.
+    if (self.enabled_since_ns is not None and now_ns - self.enabled_since_ns > ECHO_TIMEOUT_NS and
+        now_ns - feedback.echo_ns > ECHO_TIMEOUT_NS):
+      return self._fail(CC, CS, feedback, now_ns)
     self.zero_torque.update(feedback.torque_level, self.previous_di, CS.out.vEgo,
                             control_active=True, accel_command=self.vdas.jerk_limiter.a_limited)
     elapsed = frame - self.engage_frame
@@ -193,11 +251,10 @@ class PreAPPedalControl:
       # when an initial driver observation lay above the speed envelope.
       proposed = max(-5., min(pedal_max(CS.out.vEgo), proposed))
       self.previous_di = proposed
-      command = self.codec.command(proposed, enabled=True)
+      command = self._send(feedback, now_ns, proposed, enabled=True)[0]
     except ValueError:
-      # NAP: a command that cannot be computed or encoded is a disabled frame, never an exception in card.
-      self.was_active = False
-      return self._disabled(CC, CS, feedback)
+      # NAP: a command that cannot be computed or encoded ends pedal cruise, never an exception in card.
+      return self._fail(CC, CS, feedback, now_ns)
     if self.regen_decel_monitor.update(pedal_control_active=True, in_engage_grace=grace, pedal_di=proposed,
                                        limited_accel=self.vdas.jerk_limiter.a_limited,
                                        actual_accel=CS.out.aEgo, v_ego=CS.out.vEgo):

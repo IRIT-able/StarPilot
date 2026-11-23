@@ -323,18 +323,34 @@ def test_bad_feedback_checksum_disengages(engaged):
 
 # *** caps and brake ***
 
+def raw_command(rig, one, enabled=True):
+  """An enabled 0x551 frame built by hand: the car's own encoder never goes above raw 2450."""
+  import struct
+  prefix = struct.pack('>HHB', one, one // 2, (int(enabled) << 7) | rig.codec.counter)
+  accepted = rig.tx((0x551, prefix + bytes([(0x51 + 0x05 + sum(prefix)) & 255]), rig.cal.bus))
+  if accepted:
+    rig.codec.counter = (rig.codec.counter + 1) & 15
+  return accepted
+
+
 def test_enabled_command_above_raw_2500_is_rejected_whatever_the_calibration_allows():
   rig = Rig(zero=60.).engaged()              # 0 DI = raw 1631, so the calibrated bound at 80 kph (75 DI) is above raw 2500
-  di, accepted_raw = 0., 0
-  while di < 70.:
+  one = int((rig.cal.physical(0.) - D) / M1)
+  while one + 70 <= 2500:
+    one += 70                                # about 3.5 DI per frame, inside the rate limit
+    assert raw_command(rig, one), one
+  assert raw_command(rig, 2500)
+  assert not raw_command(rig, 2501)
+  assert not raw_command(rig, 2560)
+  assert raw_command(rig, 2500), 'a rejected frame leaves the accepted state untouched'
+
+
+def test_the_car_encoder_stays_under_the_panda_cap():
+  rig = Rig(zero=60.).engaged()
+  di = 0.
+  while di < 72.:
     di += 4.
-    raw = int((rig.cal.physical(di) - D) / M1)
-    ok = rig.cmd(di, enabled=True)
-    assert ok == (raw <= 2500), (di, raw)
-    if not ok:
-      break
-    accepted_raw = raw
-  assert 2400 < accepted_raw <= 2500
+    assert rig.cmd(di, enabled=True), di     # clamped at raw 2450 by the encoder, so never rejected for the cap
 
 
 @pytest.mark.parametrize('source', ['message', 'di', 'both'])
@@ -394,3 +410,72 @@ def test_absolute_angle_cap_is_360_deg():
   assert rig.steer(measured)
   assert rig.steer(sign * 3600)
   assert not rig.steer(sign * 3605)
+
+
+# *** the car's own controller against this panda: nothing it sends may be rejected ***
+
+class CarOnPanda:
+  """PreAPPedalControl and PedalFeedback driven by the same frames as the registered safety hooks, with a model of the
+  interceptor's STATE (0 from the first accepted command until 200 ms after the last, else 5)."""
+  def __init__(self, zero_torque=None):
+    from types import SimpleNamespace
+    from opendbc.car.tesla.preap.pedal_contract import PedalFeedback
+    from opendbc.car.tesla.preap.pedal_control import PreAPPedalControl
+    self.rig = Rig().arm()
+    self.fb = PedalFeedback(self.rig.cal)
+    self.pc = PreAPPedalControl(self.rig.cal)
+    if zero_torque is not None:
+      self.pc.zero_torque.get = lambda v: zero_torque
+    self.out = SimpleNamespace(canValid=True, canTimeout=False, gasPressed=False, brakePressed=False, accFaulted=False,
+                               doorOpen=False, steerFaultPermanent=False, steeringDisengage=False, vEgo=80 / 3.6, aEgo=0.)
+    self.cs = SimpleNamespace(pedal_feedback=self.fb, cruiseEnabled=True, enableLongControl=True, out=self.out,
+                              cruise_buttons=0, prev_cruise_buttons=0, preap_cc_cancel_needed=False, preap_accel_max=1.,
+                              pccEvent=None, pedal_command_failed=False)
+    self.SimpleNamespace = SimpleNamespace
+    self.last_accept, self.sent, self.rejected, self.gas_di = None, [], [], 0.
+
+  def run(self, ticks):
+    rig = self.rig
+    for _ in range(ticks):
+      rig.state = 0 if self.last_accept is not None and rig.now + 10000 - self.last_accept <= 200_000 else 5
+      rig.tick += 1
+      rig.advance(10000)
+      for frame in rig.stream.frames(rig.tick, cruise=1, speed=rig.speed):
+        rig.rx(frame)
+      if rig.tick % 2 == 0:
+        rig.fb = (rig.fb + 1) & 15
+        frame = feedback_frame(rig.cal, rig.fb, di=self.gas_di, state=rig.state)
+        rig.rx(frame)
+        self.fb.observe(frame[1], frame[2], rig.now * 1000)
+      rig.safety.safety_tick()
+      rig.safety.aol_set_host_request(3)
+      self.out.gasPressed = self.fb.gas_pressed()
+      cc = self.SimpleNamespace(enabled=True, longActive=bool(rig.mask() & 2), orientationNED=[0., 0., 0.],
+                                actuators=self.SimpleNamespace(accel=0.8))
+      for frame in self.pc.update(cc, self.cs, rig.tick, rig.now * 1000):
+        kind = 'en' if frame[1][4] & 0x80 else 'dis'
+        self.sent.append(kind)
+        if rig.tx(frame):
+          self.last_accept = rig.now
+          self.fb.note_echo(rig.now * 1000)
+        else:
+          self.rejected.append((rig.tick, kind, frame[1].hex()))
+    return self
+
+
+@pytest.mark.parametrize('zero_torque', [None, 30.])
+def test_everything_the_car_controller_sends_is_accepted_by_its_panda(zero_torque):
+  car = CarOnPanda(zero_torque).run(300)
+  assert car.sent[:1] == ['dis'] and car.sent.count('en') > 120
+  assert not car.rejected, car.rejected[:3]
+  assert not car.cs.pedal_command_failed and car.rig.safety.get_controls_allowed()
+  # A short driver press: silence, then a disabled frame before the pedal is commanded again.
+  car.gas_di = 6.
+  car.run(6)
+  car.gas_di = 0.
+  mark = len(car.sent)
+  car.run(100)
+  assert not car.rejected, car.rejected[:3]
+  after = car.sent[mark:]
+  assert after and after[0] == 'dis' and 'en' in after
+  assert not car.cs.pedal_command_failed and car.rig.safety.get_controls_allowed()

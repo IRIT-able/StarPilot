@@ -218,6 +218,23 @@ Files under `opendbc_repo/opendbc/car/tesla/preap/` unless noted.
 | Engage: seed `max(feedback, zero-torque)`, grace timed from the real control start, 0.9 DI/update take-up, `observe()` while inactive, regen under-delivery monitor | NAP `carcontroller.py` | Kept from StarPilot: final clamp to [-5, max(v)], finite-input checks, the wanted/active gates. |
 | Adaptive accel ratio uses `dRel + vLead^2/5` | NAP planner | `openpilot/starpilot/car/tesla/preap_adaptive.py`; StarPilot's freshness gates kept. |
 
+Added after the car-side safety review (fifth review, 2026-11-23):
+
+| Finding | Fix | Source |
+|---|---|---|
+| No failure latch: a command error or a failed takeover was retried every 20 ms without a fault | `pedal_control.py`: any exception, a non-finite input, an interceptor that does not leave its timeout state, or commands that do not come back from the panda latch `failed`; `CS.pedal_command_failed` makes carstate treat it as lost feedback (`accFaulted`, engagement reset, new pull needed) | NAP (latch), StarPilot (fault the engagement) |
+| The car accepted `STATE` 5 frames its panda rejects | `PedalFeedback` records what the controller sent and applies the panda's rule (never after an enabled command, not on a stream older than 100 ms) | Panda rule |
+| Commands the panda would reject, after which its counter check rejects everything | A disabled frame is sent before the first enabled one after every period in which pedal cruise was not wanted (gas, brake, faults); the engage seed is capped at measured pedal + 4 DI (panda: + 5); the encoder clamps enabled commands at raw 2450 (panda: 2500) | Panda rules; BogPilot (2450) |
+| Blocked `0x551` frames went unnoticed | The panda returns every frame it sent (bus + 128); enabled commands with no return for 100 ms latch the failure | BogPilot's intent, StarPilot's transport |
+| Calibration accepted any factor | Factor must be 0.82-3.0 and the resting pedal below the command cap | BogPilot |
+| Engagement dropped pedal cruise only on the narrow brake signal | The FSM gets the published `brakePressed` (DI bit, or brake status anything but "not applied") | BogPilot |
+
+`opendbc/safety/tests/test_tesla_preap_pedal_faults.py::test_everything_the_car_controller_sends_is_accepted_by_its_panda`
+runs the real controller against the registered safety hooks, including a short driver press and a learned zero-torque
+point far above the resting pedal. Changed expectation: NAP's `test_engage_reset_starts_estimator_from_measured_acceleration`
+assumed the first controller update is the engage; with the disabled frame first the estimator is already warm, so the test
+asserts continuity and keeps the cold-start seeding assertion on VirtualDAS itself.
+
 Kept from StarPilot although NAP differs (stricter): `steerFaultTemporary` while the EPAS reports `EAC_INHIBITED` (NAP: never).
 On this car the EPAS idles in `EAC_AVAILABLE` (678,000 frames) and reports `EAC_INHIBITED` with error 3 or 4 on 56,000
 frames while not steering, so NAP's "inhibited is the idle state" deadlock does not apply in general; whether lateral can
