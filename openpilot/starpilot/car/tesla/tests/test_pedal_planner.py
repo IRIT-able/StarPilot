@@ -12,21 +12,23 @@ from openpilot.starpilot.longitudinal.tests.test_cruise_ceiling import message_b
 
 @pytest.mark.parametrize('bus', [0, 2])
 @pytest.mark.parametrize('radar_mode', ['off', 'front', 'nosecone'])
-def test_actual_selected_startup_uses_original_integral_tune_in_current_long_control(bus, radar_mode, monkeypatch):
+def test_actual_selected_startup_leaves_outer_feedback_to_virtual_das_in_current_long_control(bus, radar_mode, monkeypatch):
   with actual_pedal_startup(bus, radar_mode, False, monkeypatch) as (card, controls, calibration, cp_bytes):
     loc = controls.LoC
     assert loc.CP.to_dict() == card.CP.to_dict()
     assert loc.extension is None
     assert loc.stopping_decel_rate == 1.0
-    for speed, gain in ((0., .05), (3., .08), (6., .1), (35., .15)):
+    # NAP: PEDAL_LONG_KI_V is all zero. LongControl passes the planner target through; VirtualDAS owns the feedback.
+    assert list(card.CP.longitudinalTuning.kiV) == [0.0] * 4
+    for speed, gain in ((0., 0.), (3., 0.), (6., 0.), (35., 0.)):
       loc.pid.speed = speed
       assert loc.pid.k_p == 0.0
       assert loc.pid.k_i == pytest.approx(gain)
     state = structs.CarState(vEgo=35., aEgo=0., gearShifter='drive', canValid=True)
     output = loc.update(True, state, .2, False, (-1.5, 1.))
     assert loc.long_control_state == structs.CarControl.Actuators.LongControlState.pid
-    assert loc.pid.i == pytest.approx(.0003)
-    assert output == pytest.approx(.2003)
+    assert loc.pid.i == 0.0
+    assert output == pytest.approx(.2)
     assert loc.update(False, state, .2, False, (-1.5, 1.)) == 0.0
     assert loc.pid.i == 0.0
 

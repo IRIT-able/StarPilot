@@ -3,11 +3,13 @@ import math
 
 from opendbc.car import structs
 from opendbc.car.tesla.values import CAR
+from opendbc.car.tesla.preap.constants import ACCEL_PREAP_BP, ACCEL_PREAP_FOLLOW
 
 SOURCE_MAX_AGE_NS = 250_000_000
 SOURCES = ('carState', 'carControl', 'controlsState', 'selfdriveState', 'radarState', 'modelV2')
-SPEED_BP = (0.0, 1.3, 7.5, 15.0, 25.0, 40.0)
-FOLLOW_ACCEL = (0.35, 0.55, 0.80, 0.75, 0.65, 0.50)
+# One copy of NAP's follow-mode table (opendbc preap/constants.py), not a second literal here.
+SPEED_BP = tuple(ACCEL_PREAP_BP)
+FOLLOW_ACCEL = tuple(ACCEL_PREAP_FOLLOW)
 
 
 def profile_key(cp):
@@ -60,12 +62,15 @@ class PreapAdaptiveAccel:
           not lead.present):
         return None
       speed, distance, upper, follow = float(car.vEgo), float(lead.dRel), float(upper), float(follow_seconds)
-      if (not all(math.isfinite(v) for v in (speed, distance, upper, follow, float(lead.vLead))) or
+      lead_speed = float(lead.vLead)
+      if (not all(math.isfinite(v) for v in (speed, distance, upper, follow, lead_speed)) or
           speed < 0 or distance <= 0 or upper < 0 or not .5 <= follow <= 3.):
         return None
-      # Original get_safe_obstacle_distance uses COMFORT_BRAKE2.5/STOP_DISTANCE6.
+      # NAP get_preap_follow_cap_strength: the lead's obstacle-equivalent distance (its own stopping distance
+      # added, get_stopped_equivalence_factor) against get_safe_obstacle_distance; COMFORT_BRAKE 2.5, STOP_DISTANCE 6.
+      lead_obstacle_distance = distance + max(lead_speed, 0.0) ** 2 / 5.0
       safe_distance = speed * speed / 5.0 + follow * speed + 6.0
-      strength = max(0.0, min(1.0, 1.0 - (distance / max(safe_distance, 1.0) - 1.2) / 0.3))
+      strength = max(0.0, min(1.0, 1.0 - (lead_obstacle_distance / max(safe_distance, 1.0) - 1.2) / 0.3))
       if strength <= 0:
         return None
       return min(upper, upper * (1.0 - strength) + follow_limit(speed) * strength)

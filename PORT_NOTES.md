@@ -188,6 +188,39 @@ Each test was checked by loosening its rule in a scratch copy and confirming the
 Not ported on purpose (StarPilot is stricter without them): donor-VIN config `0x560`, radar UDS `0x641`, bus-0 `0x2B9`,
 `0x3E9`, hands-on pause, the panda pedal-calibration mode, NAP's "brake does not drop controls".
 
+### 4. Car side: pedal, engagement, longitudinal control
+
+Files under `opendbc_repo/opendbc/car/tesla/preap/` unless noted.
+
+| Change | Source | Notes |
+|---|---|---|
+| `pedal_contract.py` `PedalFeedback`: same `0x552` rules as the panda (section 3) | This car | `commandable()` is true only with `STATE` 0; `STATE` 5 is healthy idle. Gas from channel 1. |
+| `pedal_control.py`: nothing on `0x551` while idle; disabled frames while pedal cruise is wanted but not yet active (interceptor leaves its timeout, panda can grant); enabled frames only with `STATE` 0; one disabled frame to release | Logged BogPilot drives (13 engagements) | StarPilot streamed disabled frames at 50 Hz all the time. The disabled preamble lasts until the panda grants (2-3 frames in the logs); it can last longer here, for example while selfdrived is not enabled. During gas or brake the wire is silent. |
+| Calibration zero = saved value - 1/factor; a calibration still at the defaults (factor 1.0, zero 0.0) is refused | Both references | `openpilot/starpilot/car/tesla/pedal_preferences.py`. StarPilot used the saved value directly, which put every command 1 DI higher. |
+| Stock cruise cancelled when pedal cruise starts or stops and on every stalk press | NAP | A single pull with DI cruise armed could leave the car's own cruise engaged. |
+| Brake gate: a pull with the brake held gives lateral only; the brake level (not edge) drops pedal cruise; a new double pull is needed | NAP | `engagement.py` |
+| Double-pull window 400 ms (was 500) | NAP | The panda's own window stays 500 ms. |
+| Brake = `DI_brakePedal` or `driverBrakeStatus`; hands-on level 2 disengages; `vEgoCluster` from `DI_digitalSpeed` | NAP (brake: both) | `stock.py`. Published `brakePressed` also stays true for any `driverBrakeStatus` other than not-applied (StarPilot). |
+| Steering command clamped to BogPilot's table and 360 deg before sending | BogPilot | Evaluated at the actual speed, the panda at speed - 1 m/s, so a clamped command always passes. |
+| `virtual_das.py`, `ff_table_default.py`, `constants.py`, `pedal_dynamics.py`: NAP's VirtualDAS, feedforward table, constants and zero-torque learner | NAP, copied; only the plumbing differs (no `nap_conf` singleton, zero-torque object injected) | Outer `ki` is now zero; the 7-point accel tables apply. |
+| Engage: seed `max(feedback, zero-torque)`, grace timed from the real control start, 0.9 DI/update take-up, `observe()` while inactive, regen under-delivery monitor | NAP `carcontroller.py` | Kept from StarPilot: final clamp to [-5, max(v)], finite-input checks, the wanted/active gates. |
+| Adaptive accel ratio uses `dRel + vLead^2/5` | NAP planner | `openpilot/starpilot/car/tesla/preap_adaptive.py`; StarPilot's freshness gates kept. |
+
+Kept from StarPilot although NAP differs (stricter): `steerFaultTemporary` while the EPAS reports `EAC_INHIBITED` (NAP: never).
+On this car the EPAS idles in `EAC_AVAILABLE` (678,000 frames) and reports `EAC_INHIBITED` with error 3 or 4 on 56,000
+frames while not steering, so NAP's "inhibited is the idle state" deadlock does not apply in general; whether lateral can
+start from one of those inhibited periods is not known from the logs.
+
+Not ported: NAP's pedal authority FSM and "keep lateral on pedal loss" (StarPilot faults the whole engagement), the
+`/data/vdas_ff_table.json` override (no live file reads in controllers), the planner-side regen demand check, hands-on
+pause, follow-distance dial, stalk-tap lane changes and `0x3E9`, donor VIN, `NAPForcePreAP`, the upside-down radar option.
+
+Tests: `car/tesla/tests/test_preap_pedal_car.py`, `test_preap_virtual_das.py` (85 of NAP's 100; the 15 left out test the JSON
+override), `test_preap_vdas_grade_control.py` (53), `test_preap_engage_grace.py` (7), `test_preap_accel_limits.py` (7),
+`test_preap_pedal_authority.py` (15: zero-torque learner and regen prompt cases),
+`openpilot/starpilot/car/tesla/tests/test_pedal_calibration_offset.py`, `test_preap_longitudinal_tuning.py`.
+Changed expectation: `test_pedal_planner.py` outer integral gains `.05/.08/.1/.15` -> `0` (NAP).
+
 ## Checks removed
 
 | Check | Was | Now | Why |

@@ -92,3 +92,33 @@ def test_real_current_factory_profiles_remain_outside_unfinished_pedal_path(iden
   cp = CarInterface.get_params(identity, gen_empty_fingerprint(), [], False, False, False)
   assert profile_key(cp) is None
   assert not PreapAdaptiveAccel(cp, True).enabled
+
+
+def nap_follow_cap_strength(v_ego, lead_distance, lead_speed, t_follow):
+  # NAP longitudinal_planner.get_preap_follow_cap_strength with long_mpc's COMFORT_BRAKE 2.5 and STOP_DISTANCE 6.
+  lead_obstacle_distance = lead_distance + max(lead_speed, 0.0) ** 2 / (2 * 2.5)
+  safe_obstacle_distance = v_ego ** 2 / (2 * 2.5) + t_follow * v_ego + 6.0
+  equivalent_ratio = lead_obstacle_distance / max(safe_obstacle_distance, 1.0)
+  return min(max(1.0 - (equivalent_ratio - 1.2) / 0.3, 0.0), 1.0)
+
+
+@pytest.mark.parametrize('distance,lead_speed', [(38.9, 18.04), (38.9, 0.), (100., SPEED), (100., 25.), (60., SPEED), (20., -3.)])
+def test_cap_strength_uses_the_lead_obstacle_equivalent_distance_as_nap(distance, lead_speed):
+  from opendbc.car.tesla.preap.constants import ACCEL_PREAP_BP, ACCEL_PREAP_FOLLOW
+  import numpy as np
+  owner = PreapAdaptiveAccel(protocol_params(), True)
+  assert owner.enabled
+  sm = frame(0)
+  sm['radarState'].leadOne.dRel = distance
+  sm['radarState'].leadOne.vLead = lead_speed
+  upper, follow = 1.0, 1.45
+  strength = nap_follow_cap_strength(SPEED, distance, lead_speed, follow)
+  cap = owner.sample(sm, now_ns=sm.now_ns, drive_id=DRIVE_NS, upper=upper, follow_seconds=follow, active=True)
+  if strength <= 0:
+    assert cap is None
+  else:
+    follow_limit = float(np.interp(SPEED, ACCEL_PREAP_BP, ACCEL_PREAP_FOLLOW))
+    assert cap == pytest.approx(min(upper, upper * (1.0 - strength) + follow_limit * strength))
+  # A lead at 100 m moving with the car is far in obstacle-equivalent terms: dRel alone would cap fully.
+  if (distance, lead_speed) == (100., SPEED):
+    assert 0.0 < strength < 0.1
