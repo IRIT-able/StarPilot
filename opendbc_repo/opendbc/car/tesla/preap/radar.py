@@ -5,6 +5,7 @@ Point release is gated by BogPilot's RadarValidGate (fix/preap-all @ 9ed906a641)
 until the radar reports a clean alert matrix and live tracks, and again whenever it flags missing modules, a rejected
 VIN/config, a hardware fault, or the panda stops feeding it. StarPilot's frozen startup context and frame-length filter stay.
 """
+from collections import deque
 from dataclasses import dataclass
 
 from opendbc.can import CANParser
@@ -29,10 +30,18 @@ BOSCH_TRACK_MAX_MISSED_CYCLES = 2
 BOSCH_TRACK_MAX_DISTANCE_DELTA_M = 10.0
 BOSCH_TRACK_MAX_VELOCITY_DELTA_MPS = 10.0
 
-# BogPilot: after this many update calls (100 Hz) without the cycle trigger, tracks and gate validity are dropped.
-MISSING_RADAR_FRAMES = 50
+# Radar silence (no cycle trigger), tiered. Measured on this car: the radar reboots itself now and then with
+# the panda feed healthy (2 events in 10.1 h, 5.66 s and 5.68 s, init time identical to 0.3 ms); nothing else
+# between 0.16 s and 1.8 s was ever seen mid-drive.
+SILENCE_DROP_S = 0.5            # tracks and VALID dropped, empty error-free message: camera leads (BogPilot)
+SILENCE_WARN_S = 1.0            # driver warning, no disengage
+SILENCE_FAULT_S = 8.0           # longer than one radar reboot: radarFault
+SILENCE_REPEAT_WINDOW_S = 600.0  # a second silence inside this window: radarFault while both are inside it
+SILENCE_REPEAT_COUNT = 2
 MISSING_RADAR_PUBLISH_DIV = 5
 _RADAR_FEED_FLAG = 2
+
+STATUS_OK, STATUS_NOT_READY, STATUS_SILENT = 0, 1, 2
 
 
 @dataclass(frozen=True)
@@ -43,6 +52,10 @@ class BoschTrackObservation:
   a_rel: float
   yv_rel: float
   measured: bool
+
+
+# The radar itself reports the slot as not a target (untracked, out of range, low existence probability).
+REJECTED = object()
 
 
 @dataclass
@@ -68,8 +81,13 @@ class BoschTrackLifecycle:
   def clear(self):
     self._slots.clear()
 
-  def update(self, slot: int, observation: BoschTrackObservation | None):
+  def update(self, slot: int, observation):
     track = self._slots.get(slot)
+    if observation is REJECTED:
+      # BogPilot: a target the radar has withdrawn is dropped on the same cycle. The hold below is only for
+      # a cycle whose frames did not all arrive.
+      self._slots.pop(slot, None)
+      return
     if observation is None:
       if track is None:
         return
@@ -116,8 +134,13 @@ class PreAPRadarInterface(RadarInterfaceBase):
     except (AttributeError, IndexError, TypeError, ValueError):
       radar_feed = True
     self.gate = RadarValidGate(radar_feed)
-    self.missing_calls = 0
     self.fallback_now = 0.0
+    self.start_time: float | None = None
+    self.last_cycle_time: float | None = None
+    self.silent = False
+    self.silent_calls = 0
+    self.silent_for = 0.0
+    self.silence_starts: deque[float] = deque()
 
     if self.radar_off_can:
       self.rcp = None
@@ -171,28 +194,37 @@ class PreAPRadarInterface(RadarInterfaceBase):
     if _BOSCH_RADAR_ALERT_MSG in vls:
       self.gate.on_alert_matrix(now, self.rcp.vl[_BOSCH_RADAR_ALERT_MSG])
 
+    if self.start_time is None:
+      self.start_time = now
     if self.trigger_msg not in self.updated_messages:
       # Evaluate the gate on every call, as BogPilot does: a lost-echo fault that starts and clears between
       # two radar cycles must still drop VALID.
       self.gate.update(now)
-      self.missing_calls += 1
-      if self.missing_calls < MISSING_RADAR_FRAMES:
+      self.silent_for = now - (self.start_time if self.last_cycle_time is None else self.last_cycle_time)
+      if self.silent_for <= SILENCE_DROP_S:
         return None
-      if self.missing_calls == MISSING_RADAR_FRAMES:
+      if not self.silent:
         # Radar went silent: never resume on stale tracks or a stale VALID. The frozen-table count is kept
         # (NAP), so intermittent silences cannot hide a frozen table.
+        self.silent = True
+        self.silent_calls = 0
         self.tracks.clear()
         self.gate.valid = False
         self.gate.ok_since = None
         self.gate.last_move = None
-      if (self.missing_calls - MISSING_RADAR_FRAMES) % MISSING_RADAR_PUBLISH_DIV != 0:
+        if self.last_cycle_time is not None:
+          self.silence_starts.append(now)
+      self.silent_calls += 1
+      if (self.silent_calls - 1) % MISSING_RADAR_PUBLISH_DIV != 0:
         return None
-      # BogPilot publishes an empty message here so radard drops its last tracks instead of following frozen
-      # points; NAP publishes nothing, which ends in a radar fault. Do both: no points, and a CAN error.
+      # BogPilot: an empty, error-free message, so radard drops its tracks and follows camera leads. A silence
+      # longer than one radar reboot, or a repeated one, is a radar fault.
       silent = structs.RadarData()
-      silent.errors.canError = True
+      silent.errors.radarFault = self.silent_for > SILENCE_FAULT_S or self._repeated_silence(now)
       return silent
-    self.missing_calls = 0
+    self.silent = False
+    self.silent_for = 0.0
+    self.last_cycle_time = now
 
     ret = structs.RadarData()
     if not self.rcp.can_valid:
@@ -202,7 +234,7 @@ class PreAPRadarInterface(RadarInterfaceBase):
     hw_fail = bool(radar_status["RADC_HWFail"])
     sgu_fail = bool(radar_status["RADC_SGUFail"])
     dirty = bool(radar_status["RADC_SensorDirty"])
-    ret.errors.radarFault = hw_fail
+    ret.errors.radarFault = hw_fail or self._repeated_silence(now)
     ret.errors.radarUnavailableTemporary = dirty
     if hw_fail:
       self.table_freeze.reset()
@@ -226,16 +258,30 @@ class PreAPRadarInterface(RadarInterfaceBase):
     if _BOSCH_RADAR_STATUS_MSG in self.updated_messages:
       self.gate.on_sgu(now, int(radar_status["RADC_SGU_ITC"]), sgu_fail, hw_fail, dirty)
     self.gate.on_points(now, self.tracks.observations())
-    ret.points = points if self.gate.update(now) else []
+    # BogPilot: no points while the parser is invalid, whatever the gate says.
+    ret.points = points if (self.gate.update(now) and self.rcp.can_valid) else []
 
     self.updated_messages.clear()
     return ret
 
+  def _repeated_silence(self, now):
+    while self.silence_starts and now - self.silence_starts[0] > SILENCE_REPEAT_WINDOW_S:
+      self.silence_starts.popleft()
+    return len(self.silence_starts) >= SILENCE_REPEAT_COUNT
+
+  def status(self):
+    """For the driver warning: 0 radar leads available, 1 points withheld (gate not VALID), 2 radar silent."""
+    if self.radar_off_can:
+      return STATUS_OK
+    if self.silent and self.silent_for > SILENCE_WARN_S:
+      return STATUS_SILENT
+    return STATUS_OK if self.gate.valid else STATUS_NOT_READY
+
   def _parse_track(self, msg_a, msg_b):
-    if msg_a["Index"] != msg_b["Index2"] or not msg_a["Tracked"]:
+    if msg_a["Index"] != msg_b["Index2"]:
       return None
-    if msg_a["LongDist"] <= 0.0 or msg_a["LongDist"] > 250.0 or msg_a["ProbExist"] < 50.0:
-      return None
+    if not msg_a["Tracked"] or msg_a["LongDist"] <= 0.0 or msg_a["LongDist"] > 250.0 or msg_a["ProbExist"] < 50.0:
+      return REJECTED
     return BoschTrackObservation(
       d_rel=msg_a["LongDist"],
       y_rel=msg_a["LatDist"] + self.radar_offset,

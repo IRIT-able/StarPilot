@@ -79,8 +79,13 @@ def test_original_index_probability_distance_and_track_retirement(changes):
   for tick in range(1, 5):
     result = ri.update([(tick * 125_000_000, frames(packer))])
   assert len(result.points) == 1
-  # NAP track lifecycle: a slot is held (measured=False) through two missed cycles, then retired.
   result = ri.update([(625_000_000, frames(packer, **changes))])
+  if "index" not in changes:
+    # The radar itself withdrew the target (untracked, low probability, out of range): retired on that cycle.
+    assert not result.points
+    return
+  # Halves that do not belong together are an incomplete cycle: NAP holds the slot as an unmeasured estimate
+  # through two such cycles, then retires it.
   assert len(result.points) == 1 and not result.points[0].deprecated.measured
   result = ri.update([(750_000_000, frames(packer, **changes))])
   assert len(result.points) == 1

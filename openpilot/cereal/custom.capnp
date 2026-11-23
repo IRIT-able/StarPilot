@@ -222,6 +222,7 @@ struct StarPilotCarState @0xf35cc4560bbf6ec2 {
   feedbackPublication @37 :FeedbackPublication;
   steeringLimitInfo @39 :StarPilotCarControl.SteeringLimitInfo;
   toyotaCruise @38 :ToyotaCruise;
+  preapRadarStatus @40 :UInt8;  # Tesla pre-AP radar: 0 = leads available, 1 = points withheld, 2 = radar silent
 
   struct ToyotaCruise {
     version @0 :UInt16;

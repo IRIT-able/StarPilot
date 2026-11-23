@@ -2,12 +2,11 @@
 
 Track update and lead association follow NotAutopilot naponsp-alpha @ e702d13397 (openpilot/selfdrive/controls/radard.py,
 `_update_preap`, `LeadTrackAssociation`): the Kalman filter runs at the observed radar interval, a point the receiver holds
-as an estimate (measured=False) does not update the filter, tracks are dropped after 0.5 s without a new radarTracks
-message, and radarState validity does not depend on the radarTracks rate (the radar sends 8-16 Hz, below the 20 Hz the
-service declares).
+as an estimate (measured=False) does not update the filter, and tracks are dropped after 0.5 s without a new radarTracks
+message.
 
-Added from BogPilot fix/preap-all @ 9ed906a641 (stricter than NAP): the stuck-track filter, which withholds a track whose
-range stays fixed while ego speed changes.
+Kept from BogPilot fix/preap-all @ 9ed906a641 where it is stricter than NAP: the stuck-track filter, which withholds a
+track whose range stays fixed while ego speed changes, and radarState validity that includes radarTracks.
 """
 from __future__ import annotations
 
@@ -173,7 +172,8 @@ class PreAPRadarPolicy:
 
   @staticmethod
   def valid(sm) -> bool:
-    return sm.all_checks(['modelV2', 'carState'])
+    # BogPilot: radarTracks counts (alive, valid, at least the stock 8 Hz). NAP leaves it out.
+    return sm.all_checks()
 
   def leads(self, sm, radard, model_v_ego, vision_lead):
     leads_v3 = sm['modelV2'].leadsV3

@@ -34,6 +34,8 @@ class PedalStatusConsumer:
         alerts.append(pedal_alert('engaged' if active else 'disengaged'))
       if status.pedalMaxRegen and active:
         alerts.append(pedal_alert('maxRegen'))
+      if status.preapRadarStatus:
+        alerts.append(radar_alert(status.preapRadarStatus == 2))
       self.previous = active
       return alerts
     except (AttributeError, KeyError, TypeError, ValueError, RuntimeError):
@@ -51,4 +53,15 @@ def pedal_alert(kind):
     log.SelfdriveState.AudibleAlert.disengage, 2. if regen else .8)
   alert.event_type = ET.WARNING
   alert.alert_type = f'teslaPreapPedal/{kind}/{ET.WARNING}'
+  return alert
+
+
+def radar_alert(silent):
+  # Warning only, as BogPilot's preapRadarNotReady: never NO_ENTRY, SOFT_DISABLE or IMMEDIATE_DISABLE.
+  alert = Alert('Radar Silent' if silent else 'Radar Not Ready', 'Using Camera Lead',
+    log.SelfdriveState.AlertStatus.userPrompt if silent else log.SelfdriveState.AlertStatus.normal,
+    log.SelfdriveState.AlertSize.small, Priority.LOW if silent else Priority.LOWEST,
+    VisualAlert.none, log.SelfdriveState.AudibleAlert.none, .2)
+  alert.event_type = ET.WARNING
+  alert.alert_type = f"teslaPreapRadar/{'silent' if silent else 'notReady'}/{ET.WARNING}"
   return alert

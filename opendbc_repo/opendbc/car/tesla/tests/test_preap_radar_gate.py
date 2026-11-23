@@ -7,7 +7,8 @@ when the panda stops feeding the radar, on a hardware fault, and until the radar
 import pytest
 
 from opendbc.can import CANPacker
-from opendbc.car.tesla.preap.radar import MISSING_RADAR_FRAMES
+from opendbc.car.tesla.preap.radar import (SILENCE_DROP_S, SILENCE_FAULT_S, SILENCE_REPEAT_WINDOW_S, SILENCE_WARN_S,
+                                           STATUS_NOT_READY, STATUS_OK, STATUS_SILENT)
 from opendbc.car.tesla.tests.test_preap_radar import radar_params, radar_interface
 
 DT = 0.125  # one radar cycle
@@ -130,18 +131,88 @@ def silent_calls(ri, t0, calls, echo=True):
   return out
 
 
-def test_silent_radar_loses_tracks_and_validity_and_tells_radard(radar):
+LAST_CYCLE = 6.0 - DT  # run(ri, packer, 1.0, 6.0) ends with a cycle here
+
+
+def silence(ri, t0, seconds, echo=True):
+  """(time since the last radar cycle, message) for every update call of a silence starting at t0."""
+  return [(t0 + call * 0.01 - LAST_CYCLE, rr) for call, rr in enumerate(silent_calls(ri, t0, int(seconds * 100), echo))]
+
+
+def test_silent_radar_drops_tracks_at_once_and_degrades_to_camera_leads_without_an_error(radar):
+  ri, packer = radar
+  assert run(ri, packer, 1.0, 6.0).points and ri.preap.status() == STATUS_OK
+  out = silence(ri, 6.0, 5.7)                   # one radar reboot, as logged (5.66 s and 5.68 s)
+  # Nothing for the first 0.5 s (the receiver's last tracks are already unmeasured estimates by then), then an
+  # empty message every 5th call: no points, no error of any kind.
+  assert all(rr is None for age, rr in out if age <= SILENCE_DROP_S)
+  published = [rr for age, rr in out if rr is not None]
+  assert len(published) == pytest.approx(len([1 for age, _ in out if age > SILENCE_DROP_S]) / 5, abs=1)
+  assert all(not rr.points and not any(rr.errors.to_dict().values()) for rr in published)
+  assert not ri.preap.gate.valid and not ri.preap.tracks.points
+  assert ri.preap.status() == STATUS_SILENT
+  # Radar back: still no error; points only after the gate has been re-earned.
+  rr = run(ri, packer, 11.75, 13.25)
+  assert not rr.points and not any(rr.errors.to_dict().values()) and ri.preap.status() == STATUS_NOT_READY
+  rr = run(ri, packer, 13.25, 17.0)
+  assert rr.points and not rr.errors.radarFault and ri.preap.status() == STATUS_OK
+
+
+def test_silence_status_tiers(radar):
+  ri, packer = radar
+  run(ri, packer, 1.0, 6.0)
+  seen = {}
+  for call in range(200):
+    ri.update([(int((6.0 + call * 0.01) * 1e9), [(0x109, bytes(8), 129)])])
+    seen[round(6.0 + call * 0.01 - LAST_CYCLE, 2)] = ri.preap.status()
+  assert all(status == STATUS_OK for age, status in seen.items() if age <= SILENCE_DROP_S - 0.011)
+  assert all(status == STATUS_NOT_READY for age, status in seen.items() if SILENCE_DROP_S + 0.011 < age <= SILENCE_WARN_S - 0.011)
+  assert all(status == STATUS_SILENT for age, status in seen.items() if age > SILENCE_WARN_S + 0.011)
+
+
+def test_silence_longer_than_a_radar_reboot_is_a_radar_fault_until_the_radar_returns(radar):
+  ri, packer = radar
+  run(ri, packer, 1.0, 6.0)
+  out = silence(ri, 6.0, 10.0)
+  assert all(not rr.errors.radarFault for age, rr in out if rr is not None and age <= SILENCE_FAULT_S)
+  late = [rr for age, rr in out if rr is not None and age > SILENCE_FAULT_S + 0.05]
+  assert late and all(rr.errors.radarFault and not rr.points and not rr.errors.canError for rr in late)
+  assert not ri.update(cycle(packer, 16.0)).errors.radarFault
+
+
+def test_second_silence_inside_the_window_is_a_radar_fault_for_as_long_as_both_are_inside_it(radar):
+  ri, packer = radar
+  run(ri, packer, 1.0, 6.0)
+  assert all(not rr.errors.radarFault for _, rr in silence(ri, 6.0, 2.0) if rr is not None)
+  rr = run(ri, packer, 8.0, 60.0)
+  assert rr.points and not rr.errors.radarFault
+  out = [rr for rr in silent_calls(ri, 60.0, 200) if rr is not None]
+  assert out and all(rr.errors.radarFault and not rr.points for rr in out)
+  # Radar talking again: the fault stays while two silences are inside the window, and clears afterwards.
+  rr = run(ri, packer, 62.0, 70.0)
+  assert rr.errors.radarFault
+  inside = 6.0 + SILENCE_REPEAT_WINDOW_S - 1.0
+  assert ri.update(cycle(packer, inside)).errors.radarFault
+  assert not ri.update(cycle(packer, inside + 3.0)).errors.radarFault
+
+
+def test_radar_that_never_speaks_is_error_free_at_first_and_a_fault_after_the_limit():
+  ri = radar_interface(radar_params(), gate_open=False)
+  out = [(call * 0.01, ri.update([(int((1.0 + call * 0.01) * 1e9), [(0x109, bytes(8), 129)])])) for call in range(1000)]
+  assert all(rr is None for age, rr in out if age <= SILENCE_DROP_S)
+  early = [rr for age, rr in out if rr is not None and age <= SILENCE_FAULT_S]
+  late = [rr for age, rr in out if rr is not None and age > SILENCE_FAULT_S + 0.05]
+  assert early and all(not any(rr.errors.to_dict().values()) for rr in early)
+  assert late and all(rr.errors.radarFault for rr in late)
+  assert not ri.preap.silence_starts, 'a radar that has not spoken yet is not a repeated silence'
+
+
+def test_points_are_withheld_while_the_parser_is_invalid(radar):
   ri, packer = radar
   assert run(ri, packer, 1.0, 6.0).points
-  out = silent_calls(ri, 6.0, 300)
-  # Nothing for the first 0.5 s, then an empty message with a CAN error every 5th call for as long as it lasts.
-  assert all(rr is None for rr in out[:MISSING_RADAR_FRAMES - 1])
-  published = [rr for rr in out[MISSING_RADAR_FRAMES - 1:] if rr is not None]
-  assert len(published) == (300 - MISSING_RADAR_FRAMES) // 5 + 1
-  assert all(not rr.points and rr.errors.canError for rr in published)
-  assert not ri.preap.gate.valid and not ri.preap.tracks.points
-  assert not run(ri, packer, 9.0, 10.5).points
-  assert run(ri, packer, 10.5, 14.0).points
+  # Status frames of a wrong length are filtered, so the parser times out on 0x301 while cycles continue.
+  rr = run(ri, packer, 6.0, 9.0, status_len=7)
+  assert rr.errors.canError and not rr.points
 
 
 def test_echo_loss_between_two_radar_cycles_still_drops_valid(radar):
@@ -226,3 +297,4 @@ def test_silences_do_not_reset_the_frozen_table_count(radar):
       break
     silent_calls(ri, t, 60); t += 0.6
   assert rr.errors.radarFault
+  assert not ri.preap._repeated_silence(t) or len(ri.preap.silence_starts) >= 2

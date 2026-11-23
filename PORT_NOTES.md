@@ -62,7 +62,9 @@ Files: `opendbc_repo/opendbc/car/tesla/preap/radar.py` (rewritten), `preap/radar
 | `RADC_SensorDirty` -> `radarUnavailableTemporary` | NAP | StarPilot and BogPilot ignored it. |
 | Frozen table (>= 4 points unchanged for 40 cycles) together with `RADC_SGUFail` -> `radarFault` | NAP `preap/radar_table_freeze.py`, copied unchanged | BogPilot only withholds points in this case. On the logged wrong-donor-VIN drives this raises `radarFault` from about 13-15 s after start, as NAP would. On healthy drives it never fires (0 cycles on `00000021`, `00000024`). |
 | **Radar-valid gate**: points reach radard only while VALID | BogPilot `tesla_ap1/preap/radar_valid.py`, copied with behavior unchanged | **Gap fill where BogPilot is safer.** NAP (`e702d13397`) never reads `0x501`: `radar_interface.py` has no reference to it, and `preap/radar_donor_vin.py` only looks at the VIN bit to start a VIN read. So NAP keeps using points after the radar flags `espMIA`/`gtwMIA`/`sccmMIA`/`bdyMIA` or after the panda stops feeding it. That behavior is not carried over. |
-| Radar silent for 50 update calls: tracks cleared, VALID dropped, then an empty message with `canError` every 5th call | BogPilot (empty message, so radard drops its last tracks) plus NAP's outcome (a radar error) | BogPilot's empty message is error-free and NAP publishes nothing; the port does the stricter of each. The gate is evaluated on every call, including calls without a radar cycle, as in BogPilot. The frozen-table count is not reset by a silence (NAP). |
+| Radar silent (no cycle trigger), tiered | Owner decision 2026-11-23; BogPilot for the first tier | See "Radar silence" below. The gate is evaluated on every call, including calls without a radar cycle, as in BogPilot. The frozen-table count is not reset by a silence (NAP). |
+| A target the radar itself withdraws (untracked, range outside 0-250 m, `ProbExist` < 50) is dropped on that cycle | BogPilot | NAP holds it two more cycles. The two-cycle hold is kept only for an incomplete cycle (a half missing, or halves whose index does not match). |
+| No points while the parser is invalid | BogPilot | NAP publishes them with `canError`. |
 | Status frame `0x301` accepted at 6 or 8 bytes | This car's logs (6 bytes); NAP's DBC says 6 | StarPilot's filter required 8, so status was never read. The shared generated DBC is left at 8 because the HW1 platform uses it too; all `0x301` signals sit in the first 48 bits. |
 | Frozen startup context, per-address length filter, offset from the context | StarPilot | Kept. |
 
@@ -102,8 +104,33 @@ Second review (of `1723915c6`) found two more blocking gaps in surrounding code;
 Tests: `openpilot/starpilot/car/tesla/tests/test_preap_radard.py` (NAP's eight radard scenarios adapted, plus empty-message
 drop, stuck track withheld end to end, other cars unchanged), `car/tesla/tests/test_preap_radar_stuck_tracks.py` (BogPilot's).
 
-Open: BogPilot shows a `preapRadarNotReady` warning while the gate is closed. The gate state is available on the interface
-(`RI.preap.gate.status()`), but no StarPilot alert is wired to it yet.
+Third review (of `7a8f3acf6`) found four blocking items, fixed in the commit after it:
+
+| Finding | Fix |
+|---|---|
+| Withdrawn targets held for two cycles (NAP) where BogPilot drops at once | Dropped at once; see table above. The two tests that had been changed to expect the hold assert immediate retirement again (`test_preap_radar.py`); the incomplete-cycle hold keeps its own test (`test_preap_radar_receiver.py`). |
+| `radarState` validity ignored `radarTracks` (NAP) | `sm.all_checks()` as BogPilot. As radard polls `modelV2`, the `radarTracks` rate floor is 8 Hz; this radar sends 8.7-16.7 Hz. |
+| Radar `canError` only soft-disabled (StarPilot maps it to `radarFault`); both references disengage at once | `selfdrived.py`: for `TESLA_MODEL_S_PREAP` only, radar `canError` raises `canError` (immediate disable). Other cars unchanged. StarPilot's text for that event is "Unknown Vehicle Variant". |
+
+### Radar silence
+
+Cause, from the logs (`work/log-analyst/radar_gaps_all.csv`, all 45 radar routes, 10.1 h radar-active): the radar reboots
+itself. Both mid-drive silences (`00000009` seg 19, 5.659 s; `00000021` seg 6, 5.681 s) show every radar frame stopping at
+once, `0x631` (init sync) at 2 Hz for 5.54 s (the same to 0.3 ms in both), then the radar back with power-up state. The panda
+feed was complete and byte-correct before and during both (no gap over 11 ms on a 100 Hz source, echoes equal to sources);
+bus 0 had no errors; the radar raised no missing-module bit beforehand. It is not a panda feed gap. What makes the radar
+reset (its firmware, its supply, interference) cannot be told from the logs. There is no other mid-drive gap between 0.16 s
+and 1.8 s anywhere; boot gaps (1.8-2.2 s, before the feed starts) are the only other ones.
+
+| Silence | Behavior | Value from |
+|---|---|---|
+| > 0.5 s | Tracks and VALID dropped, empty error-free `radarTracks` every 5th call: radard drops its tracks and follows camera leads. No error. | BogPilot |
+| > 1.0 s | `starpilotCarState.preapRadarStatus = 2`: "Radar Silent / Using Camera Lead", warning only. Status 1 ("Radar Not Ready") while the gate is closed for any other reason, as BogPilot's `preapRadarNotReady`. | Owner |
+| > 8.0 s (**proposed, awaiting owner**) | `radarFault` (soft disable, no entry) until the radar is back. Also applies to a radar that never speaks after startup. | One reboot is 5.66-5.68 s; 8 s is 40 % above it. |
+| 2 silences within 600 s (**proposed, awaiting owner**) | `radarFault` while both are inside the window. | Observed: never more than one per route, 0.2 per radar hour. |
+
+After a silence the points return only when the gate has been VALID-eligible for 2 s again.
+`preapRadarStatus @40` is a new `StarPilotCarState` field, registered in `fixtures/custom_reviewed_schema_additions.json`.
 
 ## Checks removed
 

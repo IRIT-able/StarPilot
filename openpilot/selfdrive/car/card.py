@@ -1148,6 +1148,8 @@ class Car:
       companion.starpilotCarState.sourceCarStateMonoTime = int(cs_send.logMonoTime)
       companion.starpilotCarState.pedalLongActive = bool(internal.enableLongControl)
       companion.starpilotCarState.pedalMaxRegen = internal.pccEvent == 'pedalMaxRegen'
+      radar = getattr(getattr(self, 'RI', None), 'preap', None)
+      companion.starpilotCarState.preapRadarStatus = int(radar.status()) if radar is not None else 0
     steering_authority = getattr(self.CI.CS, 'steering_authority', None)
     if self.CP.brand == 'gm' and steering_authority is not None and steering_authority.enabled:
       companion = messaging.new_message('starpilotCarState', valid=bool(cs_send.valid), logMonoTime=int(cs_send.logMonoTime))

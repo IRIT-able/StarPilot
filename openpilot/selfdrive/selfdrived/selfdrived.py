@@ -558,7 +558,9 @@ class SelfdriveD:
       self.events.add(EventName.selfdrivedLagging)
     if self.CP.openpilotLongitudinalControl:
       if self.sm['radarState'].radarErrors.canError:
-        self.events.add(EventName.radarFault)
+        # Tesla pre-AP: invalid radar data disengages at once, as in both of its references.
+        preap_radar = self.CP.brand == 'tesla' and self.CP.carFingerprint == 'TESLA_MODEL_S_PREAP'
+        self.events.add(EventName.canError if preap_radar else EventName.radarFault)
       elif self.sm['radarState'].radarErrors.radarUnavailableTemporary:
         self.events.add(EventName.radarTempUnavailable)
       elif any(self.sm['radarState'].radarErrors.to_dict().values()):

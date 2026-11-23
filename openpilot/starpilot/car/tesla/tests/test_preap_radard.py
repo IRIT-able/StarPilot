@@ -132,10 +132,19 @@ def test_kalman_uses_observed_radar_interval():
   assert scenario.radar.tracks[7].K_A[0][1] == pytest.approx(0.08)
 
 
-def test_validity_does_not_depend_on_the_radar_rate():
+def test_validity_includes_radar_tracks():
+  # BogPilot: radarState is valid only with radarTracks alive, valid and at the stock minimum rate.
+  services = ["modelV2", "carState", "radarTracks"]
   scenario = RadarScenario()
+  scenario.sm = messaging.SubMaster(services, ignore_alive=services, ignore_avg_freq=services)
   scenario.step(1.0, vision_d_rel=30.0, radar_points=[(7, 30.0, 0.0, 0.0)])
-  assert scenario.radar.tesla_preap.valid(scenario.sm)
+  assert scenario.radar.tesla_preap.valid(scenario.sm) and scenario.radar.radar_state_valid
+  invalid = RadarScenario()
+  invalid.sm = messaging.SubMaster(services, ignore_alive=services, ignore_avg_freq=services)
+  invalid.step(1.0, vision_d_rel=30.0)          # no radarTracks message yet: not valid
+  assert not invalid.radar.radar_state_valid
+  # As radard runs it (polling modelV2), the radarTracks floor is the stock 8 Hz; this radar sends 8.7-16.7 Hz.
+  assert messaging.SubMaster(services, poll='modelV2').freq_tracker['radarTracks'].min_freq == 8.0
 
 
 def test_stuck_track_is_withheld_from_the_lead():
