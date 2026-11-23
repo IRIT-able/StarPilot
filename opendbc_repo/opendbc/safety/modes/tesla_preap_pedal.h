@@ -46,6 +46,10 @@ static uint32_t tesla_preap_pedal_tx_stream_ts = 0U;
 #define TESLA_PREAP_PEDAL_AGREE_SLOPE 0.00844F
 #define TESLA_PREAP_PEDAL_AGREE_OFFSET (-14.17F)
 #define TESLA_PREAP_PEDAL_AGREE_TOLERANCE (4.0F / 0.050796813F)
+// Both sensors read well above zero with the pedal released (lowest logged: 416 and about 210 counts). A pair
+// reading near zero together (lost sensor supply) agrees with itself, so it needs its own floor.
+#define TESLA_PREAP_PEDAL_MIN_RAW_ONE 300U
+#define TESLA_PREAP_PEDAL_MIN_RAW_TWO 150U
 // The interceptor reports STATE 5 (command timeout) while nothing is commanding it, and STATE 0 from
 // 4-45 ms after the first 0x551 frame until 196-247 ms after the last one.
 #define TESLA_PREAP_PEDAL_STATE_OK 0U
@@ -147,6 +151,7 @@ static bool tesla_preap_pedal_feedback(const uint8_t *data, unsigned int bus, ui
     const float expected = (TESLA_PREAP_PEDAL_AGREE_SLOPE * (float)one) + TESLA_PREAP_PEDAL_AGREE_OFFSET;
     const float difference = (float)one - (2.0F * (float)two);
     const bool channels = (one < 65535U) && (two < 65535U) &&
+      (one >= TESLA_PREAP_PEDAL_MIN_RAW_ONE) && (two >= TESLA_PREAP_PEDAL_MIN_RAW_TWO) &&
       (tesla_preap_pedal_abs(difference - expected) <= TESLA_PREAP_PEDAL_AGREE_TOLERANCE);
     const bool valid = checksum && tesla_preap_pedal_state_valid(state, now) && channels && monotonic;
     // The interceptor drops a single frame now and then (135 times in 1.7 M frames, never two in a row),

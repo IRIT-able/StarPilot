@@ -153,12 +153,20 @@ engagements, each `disabled-zero` frames 20 ms apart, `STATE` 5 -> 0 within 4-45
 the end, and `STATE` back to 5 after 196-247 ms. StarPilot's alternative (disabled frames at 50 Hz all the time) appears in
 no log from this interceptor, so it is not equally proven.
 
+Known limit of W1 + W2, for the owner to accept or not (independent review, 2026-11-23): with channel 1 stuck, the
+driver's press is seen only through the agreement check, after 4.0 units of pedal travel (3.7 %) from a centered pair and
+up to 8.0 units (7.4 %) if the pair sat at the far edge of the band when it stuck
+(`test_stuck_channel_from_anywhere_in_the_band_is_caught_within_twice_the_tolerance`). Before the change that was about
+0.4 units, on a check this interceptor could never pass. Both references never detect it. With channel 2 stuck, channel 1
+still reports gas at 2 DI as normal.
+
 A failed check sets `gas_pressed`, clears `controls_allowed` and the physical arm, and needs a fresh stalk pull, as before.
 
 Tightened to match or exceed both references:
 
 | Change | Source | Test |
 |---|---|---|
+| Both sensors must read at least raw 300 (channel 1) and 150 (channel 2); the lowest logged readings are 416 and 203. A pair that drops toward zero together (lost or sagging sensor supply) still agrees with itself, so the agreement check alone accepted it, as StarPilot's did before | Review finding | `test_both_channels_low_together_is_a_fault` |
 | `0x552` byte 5 checksum (`0x52 + 0x05 + bytes 0..4`) validated; it was unchecked. Valid on all 1.7 M logged frames | This car | `test_bad_feedback_checksum_disengages` |
 | `DI_torque2.DI_brakePedal` (`0x118` byte 1 bit 7) is a second brake source, ORed with `0x20A` | Both references | `test_either_brake_source_withdraws_and_one_releasing_does_not_clear_the_other` |
 | Hands-on level 2 disengages (was 3) | NAP | `test_hands_on_level_2_disengages` |

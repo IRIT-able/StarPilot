@@ -198,6 +198,52 @@ def test_stuck_channel_on_either_side_disengages_within_the_tolerance(stuck, eng
   rig.assert_withdrawn()
 
 
+@pytest.mark.parametrize('pair', [(0, 0), (150, 82), (199, 107), (REST_RAW // 2, 116), (299, 157), (320, 149)])
+@pytest.mark.parametrize('engaged', [False, True])
+def test_both_channels_low_together_is_a_fault(pair, engaged):
+  # Lost or sagging sensor supply: the two readings still agree with each other.
+  rig = Rig().engaged() if engaged else Rig().arm()
+  rig.step(2, raw_one=pair[0], raw_two=pair[1])
+  rig.assert_withdrawn()
+
+
+@pytest.mark.parametrize('stuck', [1, 2])
+@pytest.mark.parametrize('edge', [-3.5, 3.5])
+def test_stuck_channel_from_anywhere_in_the_band_is_caught_within_twice_the_tolerance(stuck, edge):
+  # Worst case: the pair sits at one edge of the agreement band when a channel sticks.
+  rig = Rig().arm()
+  rest_one, rest_two = REST_RAW, expected_two(REST_RAW, edge)
+  moved = 0.
+  while rig.safety.get_controls_allowed() and moved < 12.:
+    moved += 0.25
+    one = rest_one if stuck == 1 else rest_one + int(moved / M1)
+    two = rest_two if stuck == 2 else expected_two(rest_one + int(moved / M1), edge)
+    rig.step(2, raw_one=one, raw_two=two)
+  assert moved <= 2 * TOLERANCE_UNITS + 0.3, moved
+  rig.assert_withdrawn()
+
+
+@pytest.mark.parametrize('di,pressed', [(1.8, False), (2.2, True)])
+def test_gas_threshold_is_two_di_on_channel_one(di, pressed):
+  rig = Rig().engaged()
+  one = int((di - D) / M1)
+  rig.step(2, raw_one=one, raw_two=expected_two(one))
+  assert rig.safety.get_controls_allowed()
+  assert (rig.mask() == 1) == pressed and rig.cmd(0., enabled=True) == (not pressed)
+
+
+def test_state5_settle_time_boundary():
+  for frames, healthy in ((4, True), (5, False)):   # last STATE 5 frame 90 ms / 110 ms into a running stream
+    rig = Rig().arm()
+    rig.step(1)                                      # commands on odd ticks, feedback on even ones
+    for _ in range(frames):
+      assert rig.cmd(enabled=False)
+      rig.step(2)
+    assert rig.cmd(enabled=False)
+    rig.step(1)
+    assert rig.safety.get_controls_allowed() == healthy, frames
+
+
 @pytest.mark.parametrize('one', [REST_RAW, 1200, 2400])
 @pytest.mark.parametrize('sign', [-1, 1])
 def test_agreement_boundary_around_the_measured_relationship(one, sign):

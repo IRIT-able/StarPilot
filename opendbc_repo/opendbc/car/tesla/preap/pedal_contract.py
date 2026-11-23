@@ -12,6 +12,8 @@ FEEDBACK_TIMEOUT_NS = 500_000_000
 AGREE_SLOPE = 0.00844
 AGREE_OFFSET = -14.17
 AGREE_TOLERANCE = 4.0 / M1
+MIN_RAW_ONE = 300
+MIN_RAW_TWO = 150
 STATE_OK = 0
 STATE_IDLE = 5
 
@@ -121,6 +123,7 @@ class PedalFeedback:
     # STATE 5 is the interceptor's idle state (no command stream). Whether it is legitimate at this moment
     # is the panda's call, which knows the accepted command timing; here it only blocks enabled commands.
     if (checksum(0x552, payload[:5]) != payload[5] or state not in (STATE_OK, STATE_IDLE) or one == 65535 or two == 65535 or
+        one < MIN_RAW_ONE or two < MIN_RAW_TWO or
         abs((one - 2 * two) - (AGREE_SLOPE * one + AGREE_OFFSET)) > AGREE_TOLERANCE):
       self.clear()
       return False

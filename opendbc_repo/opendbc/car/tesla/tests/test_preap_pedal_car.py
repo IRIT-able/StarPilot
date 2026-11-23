@@ -40,7 +40,8 @@ def test_idle_state_is_healthy_but_only_state_0_is_commandable(state):
 
 @pytest.mark.parametrize('kw', [{'state': 1}, {'state': 3}, {'state': 6}, {'bad_checksum': True}, {'one': 0, 'two': two_for(REST)}, {'two': 0},
                                 {'one': 4095, 'two': two_for(REST)}, {'two': 4095}, {'one': 65535, 'two': two_for(REST)}, {'two': 65535},
-                                {'two': two_for(REST, 4.2)}, {'two': two_for(REST, -4.2)}])
+                                {'two': two_for(REST, 4.2)}, {'two': two_for(REST, -4.2)},
+                                {'one': 0, 'two': 0}, {'one': 299, 'two': 157}, {'one': 320, 'two': 149}])
 def test_feedback_faults_clear_health(kw):
   fb, n, now = healthy_feedback()
   assert not fb.observe(frame(n, **kw), 2, now) and not fb.ready(now) and not fb.commandable(now)
