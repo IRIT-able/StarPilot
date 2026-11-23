@@ -250,6 +250,33 @@ override), `test_preap_vdas_grade_control.py` (53), `test_preap_engage_grace.py`
 `openpilot/starpilot/car/tesla/tests/test_pedal_calibration_offset.py`, `test_preap_longitudinal_tuning.py`.
 Changed expectation: `test_pedal_planner.py` outer integral gains `.05/.08/.1/.15` -> `0` (NAP).
 
+### 5. Process replay against NAP (criterion 3)
+
+`card` replayed on every logged segment by the port (`09dfac12d`) and by NAP (`e702d13397`), same pedal and radar settings,
+`carState` compared frame by frame (`work/replay/`, results `out2/*.cmp`). The port fingerprints from the logged CAN; NAP is
+forced with `NAPForcePreAP`. NAP's wall-clock stalk timing is paced at 10 ms per frame in the replay driver, otherwise a fast
+replay turns every pair of pulls into a double pull.
+
+600 segments: 578 compared (3,379,632 frames, identical frame counts and timestamps), 22 not replayable by either tree
+(20 in routes with no `carParams` message in any segment, 2 with too few CAN frames to fingerprint).
+
+Identical on every frame: `vEgo`, `vEgoRaw`, `aEgo`, steering angle, rate and torque, `steeringPressed`, `gearShifter`,
+`doorOpen`, blinkers, `canValid`, `canTimeout`, `cruiseState.available`, `stockAeb`, `espDisabled`.
+
+| Field | Frames differing | Why |
+|---|---|---|
+| `vEgoCluster` | 57.5 % | The port publishes the dash speed; NAP's `carState` carries 0 in replay. |
+| `standstill` | 42.8 % | Port: speed below 0.1 m/s. NAP: only the DI's cruise STANDSTILL state, which a pre-AP car never reports. StarPilot's value kept. |
+| `seatbeltUnlatched` | 21.0 % | Port reads the buckle (`0x201`); NAP hard-codes latched. All in parked or unbuckled segments. StarPilot's check kept. |
+| `steerFaultTemporary` | 3.4 % | Port sets it while the EPAS reports `EAC_INHIBITED`; NAP never does. StarPilot's check kept. |
+| `cruiseState.enabled`, `.speed` | 0.18 %, 0.23 %, in 11 and 20 segments | Always port disengaged where NAP stays engaged. Ten segments: a stalk CANCEL that NAP's 600 ms window ignores as an echo (`buttonEvents` `cancel` vs `unknown`, 23 frames). The logged CANCELs include BogPilot's own spoofed ones, which the port cannot recognize as its own in a replay. One segment (`00000021` seg 21): the segment starts with the stalk already pulled and the port's pedal feedback needs two frames before it allows an engagement. |
+| `accFaulted` | 0.05 %, first 1-3 frames of each segment | The port starts fail-closed until two valid `0x552` frames have arrived. |
+| `brakePressed`, `gasPressed`, `steerFaultPermanent` | under 0.01 % each | First frames of a segment (fail-closed start), EPAS status 4 at boot, and short runs around edges (longest: `gasPressed` for 17 frames in `00000008` seg 5, port pressed, NAP not). These were classified by where they occur, not examined one by one. |
+
+No field differs in the direction of the port being engaged, or reporting no fault, where NAP is not.
+This is `card` only. controlsd, selfdrived and radard have not been replayed against NAP, so "no new alerts or
+disengagements" is not shown beyond car state.
+
 ## Checks removed
 
 | Check | Was | Now | Why |
