@@ -307,8 +307,10 @@ static bool tesla_preap_tx_hook(const CANPacket_t *msg) {
     static const struct lookup_t rate_up = {{2.0F, 7.0F, 17.0F}, {8.0F, 4.0F, 2.5F}};
     static const struct lookup_t rate_down = {{2.0F, 7.0F, 17.0F}, {9.0F, 5.0F, 4.5F}};
     const float table_speed = ((float)vehicle_speed.min / VEHICLE_SPEED_FACTOR) - 1.0F;
-    const int delta_up = (int)((safety_interpolate(rate_up, table_speed) * 10.0F) + 1.0F);
-    const int delta_down = (int)((safety_interpolate(rate_down, table_speed) * 10.0F) + 1.0F);
+    const float delta_up_can = (safety_interpolate(rate_up, table_speed) * 10.0F) + 1.0F;
+    const float delta_down_can = (safety_interpolate(rate_down, table_speed) * 10.0F) + 1.0F;
+    const int delta_up = (int)delta_up_can;
+    const int delta_down = (int)delta_down_can;
     const int highest = desired_angle_last + ((desired_angle_last > 0) ? delta_up : delta_down);
     const int lowest = desired_angle_last - ((desired_angle_last >= 0) ? delta_down : delta_up);
     bool table_violation = (angle > limits.max_angle) || (angle < -limits.max_angle);
