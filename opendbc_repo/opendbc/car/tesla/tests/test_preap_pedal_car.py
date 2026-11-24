@@ -7,7 +7,7 @@ import pytest
 
 from opendbc.car import structs
 from opendbc.car.tesla.preap.engagement import PreAPEngagement
-from opendbc.car.tesla.preap.pedal_contract import AGREE_OFFSET, AGREE_SLOPE, M1, PedalCalibration, PedalFeedback, checksum
+from opendbc.car.tesla.preap.pedal_contract import AGREE_OFFSET, AGREE_SLOPE, D, M1, PedalCalibration, PedalFeedback, checksum
 from opendbc.car.tesla.preap.pedal_control import PreAPPedalControl
 from opendbc.car.tesla.preap.stock import apply_rate_table
 
@@ -75,30 +75,37 @@ class Car:
     self.fb = PedalFeedback(CAL)
     self.counter, self.frame_no, self.now, self.last_tx = 0, 0, 1_000_000_000, None
     self.out = SimpleNamespace(canValid=True, canTimeout=False, gasPressed=False, brakePressed=False, accFaulted=False,
-                               doorOpen=False, steerFaultPermanent=False, steeringDisengage=False, vEgo=20., aEgo=0.)
+                               doorOpen=False, steerFaultPermanent=False, steeringDisengage=False, vEgo=20., vEgoRaw=20.,
+                               aEgo=0.)
     self.cs = SimpleNamespace(pedal_feedback=self.fb, cruiseEnabled=False, enableLongControl=False, out=self.out,
                               cruise_buttons=0, prev_cruise_buttons=0, preap_cc_cancel_needed=False, preap_accel_max=1.,
                               pccEvent=None, pedal_command_failed=False)
     self.long_active = False
     self.echo = True
     self.stuck_idle = False
+    self.never_times_out = False   # interceptor model that stays in STATE 0 while idle (NAP's test fixture)
+    self.accel, self.orientation = 0.5, [0., 0., 0.]
+    self.fb_one = REST
     self.wire = []
+    self.commands = []             # (frame, enabled, di) of every frame sent
 
   def step(self, n=1):
     sent = []
     for _ in range(n):
       if self.frame_no % 2 == 0:
-        state = 0 if self.last_tx is not None and self.now - self.last_tx <= 200_000_000 and not self.stuck_idle else 5
-        self.fb.observe(frame(self.counter, state=state), 2, self.now)
+        recent = self.last_tx is not None and self.now - self.last_tx <= 200_000_000
+        state = 0 if (recent or self.never_times_out) and not self.stuck_idle else 5
+        self.fb.observe(frame(self.counter, one=self.fb_one, state=state), 2, self.now)
         self.counter += 1
-      cc = SimpleNamespace(enabled=True, longActive=self.long_active, orientationNED=[0., 0., 0.],
-                           actuators=SimpleNamespace(accel=0.5))
+      cc = SimpleNamespace(enabled=True, longActive=self.long_active, orientationNED=list(self.orientation),
+                           actuators=SimpleNamespace(accel=self.accel))
       out = self.pc.update(cc, self.cs, self.frame_no, self.now)
       for _, data, _ in out:
         self.last_tx = self.now
         if self.echo:
           self.fb.note_echo(self.now)   # the panda returns every frame it accepted
         sent.append('en' if data[4] & 0x80 else 'dis')
+        self.commands.append((self.frame_no, bool(data[4] & 0x80), CAL.di(struct.unpack('>H', data[:2])[0] * M1 + D)))
         if not data[4] & 0x80:
           assert data[:4] == bytes(4)
       self.frame_no += 1
@@ -259,7 +266,28 @@ def test_enabled_command_never_exceeds_the_panda_cap_and_first_command_stays_nea
   real = car.pc.codec.command
   car.pc.codec.command = lambda di=0., *, enabled=False: (seen.append(di) if enabled else None) or real(di, enabled=enabled)
   car.step(8)
-  assert seen and seen[0] <= car.fb.value + 3.9 + 1e-6, 'seed + 3.0 and one ramp step of 0.9: a full DI under the panda limit'
+  assert seen and seen[0] == pytest.approx(car.fb.value + 1.5), 'coast point far above: capped at measured + 1.5, unramped'
+
+
+@pytest.mark.parametrize('coast,expected', [(0., 0.), (0.8, 0.8), (-3., 0.)])
+def test_first_command_never_exceeds_nap_seed(coast, expected):
+  # NAP: max(measured pedal, coast point). Below 5 mph or before learning, the coast point is 0: the measured pedal.
+  car = Car()
+  car.step(20)
+  car.pc.zero_torque.get = lambda v: coast
+  car.cs.cruiseEnabled = car.cs.enableLongControl = True
+  car.long_active = True
+  seen = []
+  real = car.pc.codec.command
+  car.pc.codec.command = lambda di=0., *, enabled=False: (seen.append(di) if enabled else None) or real(di, enabled=enabled)
+  car.step(8)
+  assert seen and seen[0] == pytest.approx(car.fb.value + expected)
+
+
+def test_non_finite_raw_speed_alone_latches():
+  car = engaged_car()
+  car.out.vEgoRaw = float('nan')
+  assert car.step(2) == ['dis'] and car.cs.pedal_command_failed and car.step(20) == []
 
 
 def test_any_brake_status_other_than_released_drops_pedal_cruise():
@@ -284,3 +312,244 @@ def test_failure_stays_visible_for_a_second_and_needs_the_request_gone():
   assert not car.cs.pedal_command_failed and not car.pc.failed
   car.echo = True
   assert car.step(50) == [], 'and nothing resumes without a new pull'
+
+
+# *** every gate in `wanted`, one at a time (safety review U4) ***
+
+GATES = [('canValid', False), ('canTimeout', True), ('accFaulted', True), ('doorOpen', True), ('steerFaultPermanent', True),
+         ('steeringDisengage', True), ('gasPressed', True), ('brakePressed', True)]
+
+
+@pytest.mark.parametrize('gate,value', GATES)
+def test_each_car_side_gate_alone_releases_and_silences_the_pedal(gate, value):
+  car = engaged_car()
+  setattr(car.out, gate, value)
+  assert car.step(2) == ['dis'], 'one disabled frame to release'
+  assert car.step(60) == [], 'then nothing while the gate holds, with pedal cruise still requested'
+  setattr(car.out, gate, not value)
+  after = car.step(10)
+  assert after[:1] == ['dis'] and 'en' in after, 'a disabled frame again before any enabled one'
+
+
+@pytest.mark.parametrize('gate,value', GATES)
+def test_each_car_side_gate_alone_blocks_an_engage(gate, value):
+  car = Car()
+  car.step(20)
+  setattr(car.out, gate, value)
+  car.cs.cruiseEnabled = car.cs.enableLongControl = True
+  car.long_active = True
+  assert car.step(60) == []
+
+
+# *** acquisition: the two rules that end a takeover, each on its own ***
+
+def test_the_state5_stream_rule_alone_ends_a_takeover(monkeypatch):
+  import opendbc.car.tesla.preap.pedal_control as pedal_control
+  monkeypatch.setattr(pedal_control, 'ACQUIRE_MAX_FRAMES', 10_000)
+  car = Car()
+  car.step(20)
+  car.cs.cruiseEnabled = car.cs.enableLongControl = True
+  car.long_active = True
+  car.stuck_idle = True
+  sent = []
+  for _ in range(40):
+    sent += car.step(1)
+    if not car.fb.ready(car.now):
+      break
+  assert not car.fb.ready(car.now), 'STATE 5 more than 100 ms into a command stream is unhealthy feedback'
+  assert 'en' not in sent and 5 <= sent.count('dis') <= 7, sent
+
+
+def test_the_acquire_limit_alone_ends_a_takeover(monkeypatch):
+  import opendbc.car.tesla.preap.pedal_contract as pedal_contract
+  monkeypatch.setattr(pedal_contract, 'STATE_SETTLE_NS', 10_000_000_000)   # STATE 5 stays "healthy" for 10 s
+  car = Car()
+  car.step(20)
+  car.cs.cruiseEnabled = car.cs.enableLongControl = True
+  car.long_active = True
+  car.stuck_idle = True
+  sent = car.step(40)
+  assert car.fb.ready(car.now) and car.cs.pedal_command_failed and car.pc.failed
+  assert 'en' not in sent and 11 <= sent.count('dis') <= 13, sent
+  assert car.step(40) == []
+
+
+def test_echo_watchdog_fires_after_100_ms_of_unanswered_enabled_frames():
+  car = engaged_car()
+  car.echo = False
+  sent = car.step(40)
+  assert car.cs.pedal_command_failed
+  assert 4 <= sent.count('en') <= 6 and sent[sent.count('en')] == 'dis', sent
+
+
+# *** grace cap and handoff slew on the real controller (review U5), NAP grace start (NAP :561) ***
+
+def test_grace_cap_and_handoff_slew_on_the_real_controller():
+  from opendbc.car.tesla.preap.pedal_control import ENGAGE_GRACE_FRAMES, ENGAGE_GRACE_PEDAL_RAMP_RATE_UP
+  from opendbc.car.tesla.preap.pedal_dynamics import PEDAL_RAMP_RATE_UP
+  car = Car()
+  car.step(20)
+  car.cs.preap_accel_max = 0.8
+  car.accel = 2.0                                               # request far above the envelope at the engage speed
+  calls = []
+  real = car.pc.vdas.update
+
+  def spy(demand, v_ego, previous, **kw):
+    calls.append((car.frame_no, demand, kw['accel_effort_limits'], kw['pedal_ramp_rate_up'], kw['freeze_integrator']))
+    return real(demand, v_ego, previous, **kw)
+  car.pc.vdas.update = spy
+  car.cs.cruiseEnabled = car.cs.enableLongControl = True
+  car.long_active = True
+  car.step(400)
+  first_enabled = next(f for f, enabled, _ in car.commands if enabled)
+  assert car.pc.engage_frame == first_enabled == calls[0][0], 'the grace starts on the first enabled frame'
+  ramps_after = []
+  for f, demand, limits, ramp, freeze in calls:
+    elapsed = f - first_enabled
+    if elapsed < ENGAGE_GRACE_FRAMES:
+      cap = elapsed / ENGAGE_GRACE_FRAMES * 0.8
+      assert 0. <= demand <= cap + 1e-9 and limits[0] == 0. and limits[1] == pytest.approx(cap), (elapsed, demand)
+      assert ramp == ENGAGE_GRACE_PEDAL_RAMP_RATE_UP and freeze
+    else:
+      assert demand == 2.0 and limits is None and not freeze
+      ramps_after.append(ramp)
+  assert ramps_after[0] == ENGAGE_GRACE_PEDAL_RAMP_RATE_UP, 'the gentle take-up holds after the grace while it limits'
+  assert ramps_after[-1] == PEDAL_RAMP_RATE_UP and not car.pc.handoff_slew_active, 'and ends once the ramp stops limiting'
+
+
+# *** commanded ceiling from the raw speed the panda uses, with margin (review N4) ***
+
+@pytest.mark.parametrize('v_raw', [3., 10., 25., 38.])
+def test_command_ceiling_follows_the_raw_speed_less_the_margin(v_raw):
+  from opendbc.car.tesla.preap.pedal_contract import pedal_max
+  from opendbc.car.tesla.preap.pedal_control import SPEED_CAP_MARGIN
+  car = engaged_car()
+  car.out.vEgo, car.out.vEgoRaw = v_raw + 3., v_raw          # filtered speed lagging above the raw sample
+  car.pc.vdas.update = lambda *a, **k: 500.                     # demand far above any ceiling
+  car.step(40)
+  top = max(di for _, enabled, di in car.commands[-10:] if enabled)
+  ceiling = pedal_max(v_raw - SPEED_CAP_MARGIN)
+  assert ceiling - 0.1 <= top <= ceiling + 1e-6, (top, ceiling)
+  assert top < pedal_max(v_raw) - 0.3, 'below the table at the raw speed itself, let alone at the filtered one'
+
+
+# *** failure latch (NAP :287) ***
+
+def test_failed_takeover_cannot_late_acquire_and_rearms_only_after_the_request_drops(monkeypatch):
+  import opendbc.car.tesla.preap.pedal_contract as pedal_contract
+  monkeypatch.setattr(pedal_contract, 'STATE_SETTLE_NS', 10_000_000_000)
+  car = Car()
+  car.step(20)
+  car.cs.cruiseEnabled = car.cs.enableLongControl = True
+  car.long_active = True
+  car.stuck_idle = True
+  car.step(40)
+  assert car.pc.failed
+  car.stuck_idle = False                                        # the interceptor would answer now
+  assert car.step(300) == [] and car.cs.pedal_command_failed, 'no late acquisition while the failed request stands'
+  car.cs.cruiseEnabled = car.cs.enableLongControl = False
+  car.step(2)
+  assert not car.pc.failed, 'more than a second since the failure and no request: cleared'
+  car.cs.cruiseEnabled = car.cs.enableLongControl = True       # a new request (a new pull in carstate)
+  sent = car.step(10)
+  assert sent[:1] == ['dis'] and 'en' in sent
+
+
+# *** NAP: no launch after a gas override is released (NAP test_pedal_authority.py:575 and :610) ***
+
+def _hold_gas_override(car):
+  car.cs.cruiseEnabled = car.cs.enableLongControl = True
+  car.out.gasPressed = True
+  car.out.aEgo = 1.618
+  car.long_active = False
+  car.accel = 0.34
+  car.orientation = [0., 0.05, 0.]
+  car.step(460)
+  assert car.commands == [], 'a pedal cruise request during a gas override is silent (NAP :552)'
+
+
+def _release_gas(car, accel):
+  car.out.gasPressed = False
+  car.out.aEgo = 0.1
+  car.long_active = True
+  car.accel = accel
+
+
+@pytest.mark.parametrize('engage_a_max', (0.8, 0.9, 1.0))
+def test_gas_override_release_has_no_launch_for_1p5_seconds(engage_a_max):
+  car = Car()
+  car.never_times_out = True                                    # NAP's case: the interceptor is still in STATE 0
+  car.pc.zero_torque.get = lambda v: 0.                         # NAP's fixture: coast point PEDAL_DI_ZERO
+  car.cs.preap_accel_max = engage_a_max
+  _hold_gas_override(car)
+  _release_gas(car, 0.67)
+  release = car.frame_no
+  limited = {}
+  for _ in range(156):
+    car.step(1)
+    limited[car.frame_no - 1 - release] = car.pc.vdas.jerk_limiter.a_limited
+  assert car.commands[0][1] is False, 'a disabled frame before the first enabled one'
+  enabled = [c for c in car.commands if c[1]]
+  assert enabled and all(c[1] for c in car.commands[1:])
+  assert enabled[0][2] < car.fb.value + 0.1, 'NAP :603: no coast point above the pedal, so the first command is the pedal'
+  steps = [b[2] - a[2] for a, b in zip(enabled, enabled[1:])]
+  assert max(steps) < 1.0, steps
+  assert limited[48] < 0.4
+  assert limited[154] == pytest.approx(0.67, abs=1e-3)
+  assert not car.pc.handoff_slew_active
+
+
+def test_gas_override_release_after_the_interceptor_timed_out_has_no_launch():
+  car = Car()                                                   # the interceptor returns to STATE 5 200 ms after the last command
+  _hold_gas_override(car)
+  _release_gas(car, 0.34)
+  assert car.step(2) == ['dis']
+  assert car.pc.engage_frame < 0, 'nothing engaged while the interceptor is still in its timeout state'
+  sent = car.step(2)
+  first = next(c for c in car.commands if c[1])
+  assert sent == ['en'] and car.pc.engage_frame == first[0]
+  from opendbc.car.tesla.preap.pedal_dynamics import PEDAL_RAMP_RATE_UP
+  assert first[2] < car.fb.value + PEDAL_RAMP_RATE_UP - 1.0
+  assert car.pc.vdas.jerk_limiter.a_limited < 0.2
+  assert car.pc.vdas.grade_estimator.pitch_lp.x > 0.02, 'the grade estimate stayed warm through the override'
+
+
+# *** wire counter (NAP :143, :167) ***
+
+def test_command_counter_wraps_from_fifteen_to_zero():
+  from opendbc.car.tesla.preap.pedal_contract import PedalCodec
+  codec = PedalCodec(CAL)
+  codec.counter = 15
+  assert [codec.command(0., enabled=True)[1][4] & 15 for _ in range(3)] == [15, 0, 1]
+
+
+@pytest.mark.parametrize('initial', range(16))
+def test_any_initial_interceptor_counter_is_acquired_without_an_early_enabled_frame(initial):
+  # The interceptor takes a command only when its counter follows the last one it saw (rejected ones are remembered),
+  # and leaves its timeout state only on an accepted disabled frame (NAP's firmware model).
+  car = Car()
+  car.step(20)
+  firmware = SimpleNamespace(last=initial, state=5)
+
+  def interceptor_state():
+    return firmware.state
+  real_observe = car.fb.observe
+  car.fb.observe = lambda payload, bus, ns: real_observe(frame(payload[4] & 15, state=interceptor_state()), bus, ns)
+  real_update = car.pc.update
+
+  def update(cc, cs, frame_no, now):
+    out = real_update(cc, cs, frame_no, now)
+    for _, data, _ in out:
+      counter, enabled = data[4] & 15, bool(data[4] & 0x80)
+      accepted = counter == (firmware.last + 1) & 15
+      firmware.last = counter
+      assert not enabled or firmware.state == 0, 'enabled frame before the interceptor left its timeout'
+      if accepted and not enabled:
+        firmware.state = 0
+    return out
+  car.pc.update = update
+  car.cs.cruiseEnabled = car.cs.enableLongControl = True
+  car.long_active = True
+  sent = car.step(12)
+  assert 'en' in sent and not car.cs.pedal_command_failed
+  assert sent.index('en') <= 3

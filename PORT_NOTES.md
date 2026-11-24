@@ -241,7 +241,7 @@ Files under `opendbc_repo/opendbc/car/tesla/preap/` unless noted.
 | Brake = `DI_brakePedal` or `driverBrakeStatus`; hands-on level 2 disengages; `vEgoCluster` from `DI_digitalSpeed` | NAP (brake: both) | `stock.py`. Published `brakePressed` also stays true for any `driverBrakeStatus` other than not-applied (StarPilot). |
 | Steering command clamped to BogPilot's table and 360 deg before sending | BogPilot | Evaluated at the actual speed, the panda at speed - 1 m/s, so a clamped command always passes. |
 | `virtual_das.py`, `ff_table_default.py`, `constants.py`, `pedal_dynamics.py`: NAP's VirtualDAS, feedforward table, constants and zero-torque learner | NAP, copied; only the plumbing differs (no `nap_conf` singleton, zero-torque object injected) | Outer `ki` is now zero; the 7-point accel tables apply. |
-| Engage: seed `max(feedback, zero-torque)`, grace timed from the real control start, 0.9 DI/update take-up, `observe()` while inactive, regen under-delivery monitor | NAP `carcontroller.py` | Kept from StarPilot: final clamp to [-5, max(v)], finite-input checks, the wanted/active gates. |
+| Engage: grace timed from the real control start, 0.9 DI/update take-up, `observe()` while inactive, regen under-delivery monitor | NAP `carcontroller.py` | Kept from StarPilot: final clamp to [-5, max(v)], finite-input checks, the wanted/active gates. NAP's seed at `max(feedback, zero-torque)` was replaced; see the sixth-round table below. |
 | Adaptive accel ratio uses `dRel + vLead^2/5` | NAP planner | `openpilot/starpilot/car/tesla/preap_adaptive.py`; StarPilot's freshness gates kept. |
 
 Added after the car-side safety review (fifth review, 2026-11-23):
@@ -250,10 +250,31 @@ Added after the car-side safety review (fifth review, 2026-11-23):
 |---|---|---|
 | No failure latch: a command error or a failed takeover was retried every 20 ms without a fault | `pedal_control.py`: any exception, a non-finite input, an interceptor that does not leave its timeout state, or commands that do not come back from the panda latch `failed`; `CS.pedal_command_failed` makes carstate treat it as lost feedback (`accFaulted`, engagement reset, new pull needed) | NAP (latch), StarPilot (fault the engagement) |
 | The car accepted `STATE` 5 frames its panda rejects | `PedalFeedback` records what the controller sent and applies the panda's rule (never after an enabled command, not on a stream older than 100 ms) | Panda rule |
-| Commands the panda would reject, after which its counter check rejects everything | A disabled frame is sent before the first enabled one after every period in which pedal cruise was not wanted (gas, brake, faults); the engage seed is capped at measured pedal + 4 DI (panda: + 5); the encoder clamps enabled commands at raw 2450 (panda: 2500) | Panda rules; BogPilot (2450) |
+| Commands the panda would reject, after which its counter check rejects everything | A disabled frame is sent before the first enabled one after every period in which pedal cruise was not wanted (gas, brake, faults); the engage seed is capped at measured pedal + 4 DI (panda: + 5; superseded in the sixth round below); the encoder clamps enabled commands at raw 2450 (panda: 2500) | Panda rules; BogPilot (2450) |
 | Blocked `0x551` frames went unnoticed | The panda returns every frame it sent (bus + 128); enabled commands with no return for 100 ms latch the failure | BogPilot's intent, StarPilot's transport |
 | Calibration accepted any factor | Factor must be 0.82-3.0 and the resting pedal below the command cap | BogPilot |
 | Engagement dropped pedal cruise only on the narrow brake signal | The FSM gets the published `brakePressed` (DI bit, or brake status anything but "not applied") | BogPilot |
+
+Added after the sixth review round (2026-11-23, the reviews' non-blocking items treated as required):
+
+| Finding | Fix | Evidence |
+|---|---|---|
+| The command ceiling used the filtered `vEgo`; the panda bounds each enabled frame by the speed table at its newest raw `ESP_B` speed (0x155) with 1 count of slack | `pedal_control.command_ceiling(vEgoRaw)` = speed table at `vEgoRaw - 0.5 m/s`. The car's raw sample can be up to two `ESP_B` frames (40 ms) older than the panda's; 0.5 m/s covers 12 m/s² over that time and costs at most 0.8 DI of ceiling | `test_commands_at_the_ceiling_while_decelerating_hard_are_never_rejected` (5 m/s² at the ceiling, the car one frame behind, nothing rejected; it fails with `vEgo` or with no margin) |
+| The first enabled frame (seed capped at feedback + 3.0, plus one 0.9 DI ramp step) is rejected by the panda under this interceptor's rest noise. The panda checks it against its own newest 0x552 on both channels (+5 / -2.5 DI), which can be one frame newer than the car's. | The first enabled frame goes out unramped at min(NAP's seed max(measured, coast point), measured + 1.5 DI); VirtualDAS takes over from the next frame. It is never above NAP's seed. At speed with a coast point well above the pedal it starts lower and the grace ramp climbs at 0.9 DI per update. With the pedal above the coast point it is the measured pedal itself, where NAP's ramped first frame can be up to 2.5 DI lower; the gap is at most 2 DI (an enabled frame needs the pedal at or below 2 DI) for one 20 ms frame, and equals the driver's own pedal at that moment | Logged rest noise, 14,503 consecutive 0x552 pairs (`00000021`, `00000024`, `0000002a`; all working-hardware routes): channel 1 moves up to 67 counts (3.4 units) between frames, and channel 2 scatters around the fit independently. Share of pairs on which a first frame at feedback + c is rejected, by calibration factor: |
+
+| Factor | c = 0 | +1.0 | +1.5 | +2.0 | +3.0 | +3.9 (old) |
+|---|---|---|---|---|---|---|
+| 1.0 | 0.15 % | 0.03 % | 0.03 % | 0.06 % | 1.3 % | 13.9 % |
+| 1.25 | 2.5 % | 0.09 % | 0.09 % | 0.21 % | 5.5 % | 20.2 % |
+| 1.5 | 9.0 % | 0.52 % | 0.37 % | 1.3 % | 9.8 % | 25.0 % |
+| 2.0 | 23.7 % | 8.6 % | 5.5 % | 7.1 % | 16.5 % | 30.3 % |
+
+Replaying 1,790 consecutive logged rest frames (`opendbc/safety/tests/tesla_preap_pedal_rest_frames.json`, raw channel counts only) through the car controller and the panda hooks, with the panda one frame ahead, rejects nothing over about 35 engagements at factor 1.0 and 1.25. These rates count only the cases where the panda already has a newer frame than the car when the first enabled frame
+arrives (likely 30-50 % of engagements). A rejected first frame applies no throttle, and the echo watchdog ends the
+engagement within about 120 ms, so the cost is a nuisance fault, not a safety problem. Above a factor of about 2 the
+panda's first-frame window (StarPilot's own check, in neither reference) is narrower than this interceptor's noise
+whatever the car does. **The owner's calibration factor is not in the logs.** If it is above about 1.5, engagements will
+sometimes fault at once; widening that panda window would be the fix, and that is the owner's decision.
 
 `opendbc/safety/tests/test_tesla_preap_pedal_faults.py::test_everything_the_car_controller_sends_is_accepted_by_its_panda`
 runs the real controller against the registered safety hooks, including a short driver press and a learned zero-torque

@@ -194,3 +194,15 @@ def test_policy_only_selected_for_preap_with_radar():
   assert not is_preap_radar(cp(radar_unavailable=True))
   assert not is_preap_radar(cp(fingerprint="TESLA_MODEL_Y"))
   assert not is_preap_radar(cp(brand="honda"))
+
+
+def test_low_speed_radar_only_lead_override_is_on_for_lead_one_only():
+  # NAP keeps radard's low-speed override on pre-AP (BogPilot turns it off; the reviews leave the choice open): below
+  # 4 m/s a close in-path radar track becomes leadOne even when the camera lead is farther away. Pinned as NAP.
+  scenario = RadarScenario(v_ego=2.0)
+  lead = scenario.step(1.0, vision_d_rel=40.0, radar_points=[(5, 10.0, 0.5, 0.0)], vision_v=2.0)
+  assert lead.radar and lead.radarTrackId == 5 and lead.dRel == pytest.approx(10.0)
+  assert not scenario.radar.radar_state.leadTwo.radar
+  fast = RadarScenario(v_ego=6.0)
+  lead = fast.step(1.0, vision_d_rel=40.0, radar_points=[(5, 10.0, 0.5, 0.0)], vision_v=6.0)
+  assert not lead.radar and lead.dRel == pytest.approx(40.0)

@@ -17,7 +17,10 @@ from openpilot.starpilot.car.tesla.tests.pedal_fixture import actual_pedal_start
 @pytest.mark.parametrize('bus', [0, 2])
 @pytest.mark.parametrize('radar_mode', ['off', 'front', 'nosecone'])
 @pytest.mark.parametrize('fault', ['gas', 'brake', 'dropout', 'reverse', 'feedback_state', 'counter', 'channels', 'wrong_bus',
-                                   'eps', 'door', 'belt', 'eps_temporary'])
+                                   'eps', 'door', 'belt', 'eps_temporary',
+                                   # carstate plumbing: broad brake and the DI brake bit into the engagement logic, hands-on
+                                   # level 2, a missing chassis message, and a blocked command stream (latch, then a new pull)
+                                   'brake_status_0', 'brake_status_3', 'di_brake', 'hands2', 'can_missing', 'echo_loss'])
 def test_real_selected_pedal_fault_withdrawal_and_physical_reengagement(bus, radar_mode, fault, monkeypatch):
   safety = libsafety_py.libsafety
   release = safety.set_safety_hooks(structs.CarParams.SafetyModel.allOutput, 0) != 0
@@ -31,14 +34,17 @@ def test_real_selected_pedal_fault_withdrawal_and_physical_reengagement(bus, rad
     receipt = None
     selfdriven, observed, diagnostics = {}, {}, {}
     alerts_seen = set()
+    radar_statuses = set()
     echoes = []
     try:
       for tick in range(310):
         now = 2_000_000_000 + tick * 10_000_000
-        bad = 120 <= tick < (180 if fault in ('dropout', 'reverse', 'wrong_bus') else 140)
+        bad = (96 if fault == 'echo_loss' else 120) <= tick < (180 if fault in ('dropout', 'reverse', 'wrong_bus', 'can_missing') else 140)
+        brake = 2 if bad and fault == 'brake' else 0 if bad and fault == 'brake_status_0' else 3 if bad and fault == 'brake_status_3' else 1
         lever = 2 if tick in (65, 75, 220, 230) else 1 if tick == 275 else 0
-        incoming = stream.frames(tick, lever=lever, cruise=1,
-          brake=2 if bad and fault == 'brake' else 1, gear=2 if bad and fault == 'reverse' else 4,
+        incoming = stream.frames(tick, lever=lever, cruise=1, brake=brake, di_brake=int(bad and fault == 'di_brake'),
+          hands=2 if bad and fault == 'hands2' else 0, omit='ESP_B' if bad and fault == 'can_missing' else None,
+          gear=2 if bad and fault == 'reverse' else 4,
           doors=1 if bad and fault == 'door' else 0, belt=0 if bad and fault == 'belt' else 1,
           eps_status=3 if bad and fault == 'eps' else 0 if bad and fault == 'eps_temporary' else 1,
           eps_error=15 if bad and fault == 'eps' else 0)
@@ -52,7 +58,8 @@ def test_real_selected_pedal_fault_withdrawal_and_physical_reengagement(bus, rad
         for address, data, source in incoming:
           safety.safety_rx_hook(libsafety_py.make_CANPacket(address, source, data))
         # The panda returns every 0x551 frame it accepted and sent (source bus + 128); the car watches for that.
-        incoming.extend(echoes)
+        if not (bad and fault == 'echo_loss'):
+          incoming.extend(echoes)
         echoes = []
         safety.safety_tick()
         peers = []
@@ -95,6 +102,10 @@ def test_real_selected_pedal_fault_withdrawal_and_physical_reengagement(bus, rad
         assert status.sourceCarStateMonoTime == published['carState'].logMonoTime
         assert status.pedalLongActive == ci.CS.preap.enableLongControl
         assert status.pedalMaxRegen == (ci.CS.preap.pccEvent == 'pedalMaxRegen')
+        # The receiver's status reaches the companion through the real state_publish; this radar never speaks.
+        receiver = getattr(card.RI, 'preap', None)
+        assert status.preapRadarStatus == (int(receiver.status()) if receiver is not None else 0)
+        radar_statuses.add(int(status.preapRadarStatus))
         mask = safety.aol_get_permission_mask()
         native = SafetyState(1, True, now, now + 30_000_000, 39, word, bool(mask & 1), bool(mask & 2),
                              bool(safety.aol_get_request_mask() & 1), bool(safety.aol_get_request_mask() & 2),
@@ -146,7 +157,9 @@ def test_real_selected_pedal_fault_withdrawal_and_physical_reengagement(bus, rad
             enabled_pedal |= bool(data[4] & 128)
         assert not command.longActive or bool(mask & 2)
         assert not enabled_pedal or command.longActive
-        if bad and fault in ('gas', 'brake', 'reverse', 'feedback_state', 'counter', 'channels', 'eps', 'door', 'belt') and tick >= 122:
+        if bad and fault in ('gas', 'brake', 'reverse', 'feedback_state', 'counter', 'channels', 'eps', 'door', 'belt',
+                             'brake_status_0', 'brake_status_3', 'di_brake', 'hands2', 'can_missing', 'echo_loss') and \
+           tick >= (145 if fault == 'can_missing' else 122):   # a missing message: canValid falls after the parser's 10 periods
           assert not enabled_pedal
         if bad and fault == 'eps_temporary' and tick >= 122:
           assert not command.latActive, 'temporary EPS inhibition must suppress lateral commands'
@@ -156,6 +169,8 @@ def test_real_selected_pedal_fault_withdrawal_and_physical_reengagement(bus, rad
                                str(wanted), sd.events.names, mask, observed[tick], command.actuators.accel)
         previous = command
       assert any(observed[t][0] and observed[t][1] for t in range(95, 115)), ('actual initial pedal engagement missing', diagnostics)
+      # Off: nothing to warn about. Configured but never heard from: not ready (1), then silent (2) after 1 s.
+      assert radar_statuses == ({0} if radar_mode == 'off' else {1, 2}), radar_statuses
       assert 'teslaPreapPedal/engaged/warning' in alerts_seen
       assert 'teslaPreapPedal/disengaged/warning' in alerts_seen
       assert not any(name.startswith('teslaStockCruise/') for name in alerts_seen)

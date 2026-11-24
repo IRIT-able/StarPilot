@@ -92,11 +92,25 @@ def _finite(*values):
     return False
 
 
-FIRST_COMMAND_MAX_ABOVE_FEEDBACK = 3.0   # DI; the panda allows +5 on the first enabled frame, the ramp adds up to 0.9,
-                                         # and its newest feedback frame can differ from ours by sensor noise
+# The panda checks the first enabled frame against its own newest 0x552, on both channels (+5 / -2.5 DI). That frame
+# can be one newer than the car's; on this interceptor channel 1 moves up to 67 counts (3.4 units) between frames at
+# rest and channel 2 scatters around the fit on its own. Replayed over 14,503 logged rest frame pairs, an unramped
+# first frame at +1.5 DI is rejected on 0.03 % of pairs at factor 1 (0.09 % at 1.25); +3.9 DI was rejected on 14 %.
+# With no learned coast point above the pedal (low speed) the first frame is the measured pedal itself, as NAP.
+FIRST_COMMAND_ABOVE_FEEDBACK = 1.5
 FAILURE_HOLD_NS = 1_000_000_000          # the fault stays visible this long, whatever the engagement does
 ACQUIRE_MAX_FRAMES = 10                  # 200 ms of disabled frames without the interceptor leaving its timeout state
 ECHO_TIMEOUT_NS = 100_000_000
+# The panda bounds every enabled frame by the speed table at the newest raw ESP_B speed it has (0x155, 50 Hz), not
+# by the filtered vEgo. The car's raw sample can be up to two ESP_B frames older than the panda's when the frame goes
+# out; 0.5 m/s covers 12 m/s^2 over those 40 ms, and costs at most 0.8 DI of ceiling.
+SPEED_CAP_MARGIN = 0.5
+
+
+def command_ceiling(v_ego_raw):
+  """Highest DI the panda accepts at any raw speed the car could be behind by."""
+  return pedal_max(max(0., v_ego_raw - SPEED_CAP_MARGIN))
+
 
 class PreAPPedalControl:
   def __init__(self, calibration):
@@ -193,15 +207,16 @@ class PreAPPedalControl:
     if requested != self.was_requested or stalk_press:
       CS.preap_cc_cancel_needed = True
     self.was_requested = requested
-    finite = _finite(CC.actuators.accel, CS.out.vEgo, CS.out.aEgo, *CC.orientationNED)
-    if active and finite and not self.was_active:
+    finite = _finite(CC.actuators.accel, CS.out.vEgo, CS.out.vEgoRaw, CS.out.aEgo, *CC.orientationNED)
+    first = bool(active and finite and not self.was_active)
+    if first:
       # Seed and grace start when control really starts (NAP), not when it was first asked for.
-      # NAP never seeds below the learned coast position; the DI domain clamp is this port's.
       self.engage_frame = frame
       self.handoff_slew_active = True
-      # The panda checks the first enabled frame against the measured pedal (+5 / -2.5 DI); stay inside that.
-      seed = min(max(feedback.value, self.zero_torque.get(CS.out.vEgo)), feedback.value + FIRST_COMMAND_MAX_ABOVE_FEEDBACK)
-      self.previous_di = min(pedal_max(CS.out.vEgo), max(-5., seed))
+      # NAP seeds at max(measured pedal, learned coast point). The first frame never goes above that, and never more
+      # than FIRST_COMMAND_ABOVE_FEEDBACK above the measured pedal (the panda's window); the grace ramp climbs on.
+      seed = min(max(feedback.value, self.zero_torque.get(CS.out.vEgo)), feedback.value + FIRST_COMMAND_ABOVE_FEEDBACK)
+      self.previous_di = min(command_ceiling(CS.out.vEgoRaw), max(-5., seed))
       self.vdas.reset(measured_accel=CS.out.aEgo, commanded_accel=0., pedal_di_init=self.previous_di,
                       preserve_grade=True)
       self.engage_a_max = CS.preap_accel_max
@@ -253,7 +268,9 @@ class PreAPPedalControl:
         self.handoff_slew_active = False
       # Apply hard domain last: original rate clamp could otherwise escape it
       # when an initial driver observation lay above the speed envelope.
-      proposed = max(-5., min(pedal_max(CS.out.vEgo), proposed))
+      proposed = max(-5., min(command_ceiling(CS.out.vEgoRaw), proposed))
+      if first:
+        proposed = self.previous_di
       self.previous_di = proposed
       command = self._send(feedback, now_ns, proposed, enabled=True)[0]
     except ValueError:

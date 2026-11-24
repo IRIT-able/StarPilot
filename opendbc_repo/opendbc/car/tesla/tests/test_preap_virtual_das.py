@@ -1323,7 +1323,7 @@ class TestVDASDomainBoundaries:
     cs = SimpleNamespace(
       cruiseEnabled=True,
       enableLongControl=True,
-      out=SimpleNamespace(vEgo=15.0, aEgo=measured_acceleration, gasPressed=False, brakePressed=False,
+      out=SimpleNamespace(vEgo=15.0, vEgoRaw=15.0, aEgo=measured_acceleration, gasPressed=False, brakePressed=False,
                           canValid=True, canTimeout=False, accFaulted=False, doorOpen=False,
                           steerFaultPermanent=False, steeringDisengage=False),
       cruise_buttons=0,

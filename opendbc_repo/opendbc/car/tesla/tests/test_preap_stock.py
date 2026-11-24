@@ -54,7 +54,9 @@ def test_wrong_model_35_cannot_be_preap_or_overwrite_byd():
 
 @pytest.mark.parametrize("state, field", (({"brake": 2}, "brakePressed"), ({"brake": 0}, "brakePressed"),
   ({"belt": 0}, "seatbeltUnlatched"), ({"doors": 2}, "doorOpen"), ({"doors": 3}, "doorOpen"),
-  ({"eps_error": 15}, "steerFaultPermanent"), ({"speed": 0.0}, "standstill")))
+  ({"eps_error": 15}, "steerFaultPermanent"), ({"speed": 0.0}, "standstill"),
+  ({"brake": 3}, "brakePressed"), ({"di_brake": 1}, "brakePressed"), ({"hands": 2}, "steeringDisengage"),
+  ({"hands": 3}, "steeringDisengage")))
 def test_actual_parser_reports_physical_or_unknown_restrictions(state, field):
   ci = CarInterface(params())
   stream = PreAPStream()
@@ -166,3 +168,32 @@ def test_ordinary_temporary_restriction_without_matched_cancel_retains_arm():
     now_ns=100, pending_since_ns=1, pending_cancel_ns=0) == (0, False, False)
   assert native_observation(None, latched=True, panda_ready=True, restricted=True,
     now_ns=100, pending_since_ns=1, pending_cancel_ns=0) == (0, True, False)
+
+
+@pytest.mark.parametrize("state", ({}, {"hands": 1}, {"brake": 1, "di_brake": 0}))
+def test_actual_parser_reports_no_restriction_for_released_brake_and_low_hands_on_level(state):
+  ci = CarInterface(params())
+  stream = PreAPStream()
+  ci.update([])
+  for tick in range(1, 61):
+    cs = ci.update([(1_000_000_000 + tick * 10_000_000, stream.frames(tick, **state))])
+  assert cs.canValid and not cs.brakePressed and not cs.steeringDisengage
+
+
+@pytest.mark.parametrize("hands,active", ((0, True), (1, True), (2, False), (3, False)))
+def test_hands_on_level_2_ends_lateral_commands_on_the_car_side(hands, active):
+  # NAP: hands-on level 2 disengages; the controller also stops sending active steering frames at that level.
+  ci = CarInterface(params())
+  stream = PreAPStream()
+  ci.update([])
+  command = structs.CarControl()
+  command.latActive = True
+  command.actuators.steeringAngleDeg = 1.0
+  types = []
+  for tick in range(1, 81):
+    now = 1_000_000_000 + tick * 10_000_000
+    ci.update([(now, stream.frames(tick, hands=hands))])
+    ci.CS.preap_lateral_authorized = True
+    _, tx = ci.apply(command.as_reader(), now)
+    types += [data[2] >> 6 for address, data, bus in tx if address == 0x488 and bus == 0]
+  assert types and all(t == (1 if active else 0) for t in types[-10:]), types[-10:]

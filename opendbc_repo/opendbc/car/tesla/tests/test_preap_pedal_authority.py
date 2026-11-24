@@ -73,7 +73,7 @@ def controller_env():
   cs = SimpleNamespace(
     cruiseEnabled=False,
     enableLongControl=False,
-    out=SimpleNamespace(vEgo=15.0, aEgo=0.0, gasPressed=False, brakePressed=False, canValid=True,
+    out=SimpleNamespace(vEgo=15.0, vEgoRaw=15.0, aEgo=0.0, gasPressed=False, brakePressed=False, canValid=True,
                         canTimeout=False, accFaulted=False, doorOpen=False, steerFaultPermanent=False,
                         steeringDisengage=False),
     cruise_buttons=0,
