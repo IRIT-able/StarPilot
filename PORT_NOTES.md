@@ -293,6 +293,28 @@ Safety review of the seventh round: NON-BLOCKING ONLY (two passes). Its remainin
 on alternate ticks with healthy feedback would restart the 1 s bound each time (no such panda path found); the bound needs
 the panda's own LONG request bit, and a panda that clears its whole request mask is caught by the existing RX checks.
 
+#### Owner decisions, 2026-11-24
+
+- **Pedal calibration.** Inferred from manual driving in the logs by the harness session (BogPilot's definitions,
+  `DI = (gas - Zero) * Factor`, Zero = gas at the first `DI_pedalPos >= 0.4 %`): factor median **0.973** (IQR 0.970-0.975),
+  zero median **1.47** (IQR 1.34-1.83), stable across 24 drives and both remotes (`~/op-harness/DESIGN.md` section 5.5,
+  read-only). At this factor the panda's first-frame window is wider than the interceptor's rest noise (the 1.0 row of the
+  table above), and 0.973 is inside the accepted range (0.82-3.0). The panda check stays as it is. **To be confirmed against
+  the device's saved values in `/data/params_bogpilot` once the owner has the device.**
+- **Radar-bus interrupt-rate fault: exemption kept, threshold not changed.** The rates are logged per IRQ
+  (`pandaStates[].canState1.irq0CallRate/irq1CallRate`, 600 segments, 698,000 samples). With the car's safety mode active
+  (more than 2 s after leaving ELM327) bus 1 runs at a median of 1,315 interrupts/s per IRQ, 1,564 at most; the limit is
+  16,000. The fault comes from 86 error storms, each 30,000-42,000 errors in 1.6-2.2 s, peaking at 18,800-21,551/s. In every one
+  the panda has a frame queued on bus 1 and nothing acknowledges it (`rx` 0-350 during the storm), so each retry is an error
+  interrupt. **All 86 happen in safety model 3 (ELM327, param 0 or 1), i.e. during fingerprinting and the firmware query,
+  before openpilot or the panda knows which car this is**; none happens in the car's mode (its 28 small error bursts stay
+  under 1,462/s). The bit is not permanent (`PERMANENT_FAULTS` is 0): the firmware only records it, and it stays set until
+  the panda reboots, so 27 of the 43 routes started with it already set from an earlier drive. A threshold for this car
+  would take effect only when safety mode 39 is set, after the bit has already latched; making it effective would mean
+  raising the FDCAN2 limit for every car, or clearing a latched fault on a mode change. Neither is acceptable, so the
+  exemption stays as it is.
+- **Low-speed radar override:** stays on, as in NAP.
+
 Kept from StarPilot although NAP differs (stricter): `steerFaultTemporary` while the EPAS reports `EAC_INHIBITED` (NAP: never).
 On this car the EPAS idles in `EAC_AVAILABLE` (678,000 frames) and reports `EAC_INHIBITED` with error 3 or 4 on 56,000
 frames while not steering, so NAP's "inhibited is the idle state" deadlock does not apply in general; whether lateral can
