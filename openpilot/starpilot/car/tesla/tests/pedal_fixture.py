@@ -45,7 +45,7 @@ def feedback_frame(calibration, counter, *, di=0., state=0, wrong_bus=False, bad
 
 
 @contextmanager
-def actual_pedal_startup(bus, radar_mode, release, monkeypatch):
+def actual_pedal_startup(bus, radar_mode, release, monkeypatch, always_on_lateral=False):
   from opendbc.car import car_helpers
   from openpilot.selfdrive.car import card as card_module
   from openpilot.starpilot.car.tesla.pedal_startup import KEY, decode
@@ -55,7 +55,7 @@ def actual_pedal_startup(bus, radar_mode, release, monkeypatch):
   fingerprint[0] = dict(FINGERPRINTS[CAR.TESLA_MODEL_S_PREAP][0])
   with OpenpilotPrefix():
     params = Params()
-    for key, value in (('OpenpilotEnabledToggle', True), ('AlwaysOnLateral', False),
+    for key, value in (('OpenpilotEnabledToggle', True), ('AlwaysOnLateral', always_on_lateral),
                        ('NAPPedalEnabled', True), ('NAPPedalCalibDone', True), ('IsReleaseBranch', release)):
       params.put_bool(key, value, block=True)
     params.put('NAPPedalCanBus', bus, block=True)

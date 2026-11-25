@@ -29,6 +29,14 @@ def _diagnostic_mask(cp):
       return (1 << 3) if (int(cp.flags) == int(recorded_flags) and
                          len(cp.safetyConfigs) == 1 and int(cp.safetyConfigs[0].safetyParam) == 0xC02 and cp.alternativeExperience == 32 and
                          qualified(cp, marked_only=True)) else 0
+    if cp.brand == 'tesla':
+      from opendbc.car.tesla.preap.aol import qualified as preap_qualified
+      # Pre-AP Model S: the logging panda reported only the CAN2 (radar bus) interrupt-rate
+      # diagnostic, latched from boot, on all 600 logged segments, stock cruise and pedal alike,
+      # while the drives ran normally. NAP and BogPilot ignore panda faults. Only that bit is
+      # exempt, and only for the exact admitted single-panda model-39 profiles; every other
+      # fault, and the interrupt rate of any other bus, remains blocking.
+      return (1 << 3) if preap_qualified(cp) else 0
     from opendbc.car.gm.aol import qualified_gm
     from opendbc.car.gm.values import CAR, is_volt_sdgm_profile, is_bolt_present_no_acc_pedal_profile
     if cp.brand != 'gm' or len(cp.safetyConfigs) != 1:

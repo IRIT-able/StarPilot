@@ -2014,6 +2014,9 @@ class SelfdriveD:
     from openpilot.starpilot.car.toyota.aol import qualified as toyota_aol_qualified
     toyota_longitudinal = bool(self.CP.brand == 'toyota' and self.CP.openpilotLongitudinalControl and
                               toyota_aol_qualified(self.CP, marked_only=True))
+    # Pre-AP pedal cruise is a full engagement with no independent AOL latch, like ordinary Ford cruise.
+    from openpilot.starpilot.car.tesla.aol import early_native_long_withdrawal_supported as preap_long_withdrawal
+    preap_pedal = preap_long_withdrawal(self.CP)
     steering_override_allowed = (ordinary_ford or toyota_longitudinal or self.CP.brand == 'hyundai' or
                                  volkswagen_long_qualified(self.CP, marked_only=True) or
                                  self.CP.openpilotLongitudinalControl and volkswagen_pq_qualified(self.CP, marked_only=True))
@@ -2037,7 +2040,7 @@ class SelfdriveD:
         now_ns > proof[3] and not (ordinary_ford and proof[1] < self.aol_car_state_log_ns and
           intent is not None and intent.allowedLatch and intent.lateralArmed and not intent.pauseLateral) or
         intent is None or companion is None or proof[4] != intent.producerSessionId or
-        proof[5] != companion.integrity_epoch or not ((intent.allowedLatch and intent.lateralArmed) or ordinary_ford) or
+        proof[5] != companion.integrity_epoch or not ((intent.allowedLatch and intent.lateralArmed) or ordinary_ford or preap_pedal) or
         not ford_long_only and (not native.requestedLateral or not native.lateralAllowed) or
         not native.requestedLongitudinal or native.longitudinalAllowed or not native.pandaInventory or
         CS.brakePressed or CS.regenBraking or CS.gasPressed or CS.steeringPressed and not steering_override_allowed or
@@ -2077,6 +2080,7 @@ class SelfdriveD:
     return bool(ordinary_ford or honda_aol_qualified(self.CP, marked_only=True) or
                 gm_native_accepts_cp(self.CP, native.safetyModel, native.safetyParam) or
                 early_native_long_withdrawal_supported(self.CP) or
+                preap_pedal or
                 toyota_longitudinal or
                 not native.pandaInventory[owners[0]].controlsAllowed and
                 not self.sm['pandaStates'][owners[0]].controlsAllowed)
@@ -2223,6 +2227,9 @@ class SelfdriveD:
         previous.longitudinal_active and requested.desired_longitudinal and native.requestedLongitudinal and
         not native.longitudinalAllowed and not ordinary_long_withdrawal and
         not self.events.contains(ET.OVERRIDE_LONGITUDINAL)))
+      from openpilot.starpilot.car.tesla.aol import long_denial_expired as preap_long_denial_expired
+      lost_permission = bool(lost_permission or preap_long_denial_expired(self, self.CP, native, requested, enabled=self.enabled,
+        driver_override=driver_override or self.events.contains(ET.OVERRIDE_LONGITUDINAL), now_ns=now_ns))
       if not hasattr(self, 'aol_transport_pause'):
         self.aol_transport_pause = TransportPause(self.CP, self.aol_session_id)
       pause, upgraded = self.aol_transport_pause.observe(
