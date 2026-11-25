@@ -282,6 +282,17 @@ point far above the resting pedal. Changed expectation: NAP's `test_engage_reset
 assumed the first controller update is the engage; with the disabled frame first the estimator is already warm, so the test
 asserts continuity and keeps the cold-start seeding assertion on VirtualDAS itself.
 
+Added after the closed-loop replay of card, radard, selfdrived and controlsd (seventh round, 2026-11-24, `c97447780`):
+
+| Finding | Fix | Evidence |
+|---|---|---|
+| openpilot was never available on this car: the panda reports `interruptRateCan2` (FDCAN2, the radar bus), latched from boot, and StarPilot's selfdrived makes any panda fault not exempted for the platform `controlsMismatch`. NAP and BogPilot ignore panda faults except `relayMalfunction`. The CAN interrupt-rate limit (16000/s) is the same in StarPilot, BogPilot and NAP firmware | `starpilot/aol/panda_faults.py`: that bit alone is diagnostic for the admitted single-panda model-39 profiles (stock 0/2/6 and pedal 1/3/7), as StarPilot already does for named Honda, Hyundai and GM profiles. Every other fault, a mix of faults, and the interrupt rate of any other bus still block | All 600 logged segments report only this fault (99.8 % of frames). With the logged faults kept the port never engaged before the change and engages on all 13 logged engagements after it. `test_preap_panda_faults.py` (every fault type alone and mixed, profile mutations) |
+| Releasing the gas while engaged was an immediate disable ("TAKE CONTROL IMMEDIATELY", 11 of 13 logged engagements). The panda drops its LONG bit on gas and keeps it off until a fresh disabled `0x551` after any interceptor STATE 5 frame; both edges reach the panda before card publishes them, and pandad's receipt is read at 10 Hz (`pandad.cc`), so selfdrived saw "LONG requested, not allowed, no override" for up to 100 ms after a release, or for one frame after the interceptor's wake frame | `selfdrived.ordinary_native_long_withdrawal`: a LONG-only denial on the admitted pedal profile (AE 32) is an ordinary withdrawal, as it already is for Ford, Honda, GM, Toyota and Hyundai; pedal cruise is a full engagement with no separate AOL latch, like ordinary Ford cruise. LONG output still stops on the first denied tick. Bounded by `starpilot/car/tesla/aol.long_denial_expired`: a LONG request the panda still denies after 1 s with no driver input is the lost-permission fault again (worst-case re-arm after a release is about 165 ms) | Replay: 0 `controlsMismatch`, every disengagement a driver action at the same time as NAP's (`work/replay2/REPORT.md`). `test_pedal_callers.py` `gas_wire` (release on pandad's read tick) and `gas_state5` (the interceptor's logged STATE 5 timeout and 40 ms wake): both fail without the change, the second already at the engagement from idle. `long_withheld`: the fault fires at 1.00 s, not before; fails without the bound. `single_pull`: lateral-only stays up (selfdrived is not "enabled", so the bound cannot apply). Every fault case now runs with AlwaysOnLateral off and on |
+
+Safety review of the seventh round: NON-BLOCKING ONLY (two passes). Its remaining notes: a panda that grants and denies LONG
+on alternate ticks with healthy feedback would restart the 1 s bound each time (no such panda path found); the bound needs
+the panda's own LONG request bit, and a panda that clears its whole request mask is caught by the existing RX checks.
+
 Kept from StarPilot although NAP differs (stricter): `steerFaultTemporary` while the EPAS reports `EAC_INHIBITED` (NAP: never).
 On this car the EPAS idles in `EAC_AVAILABLE` (678,000 frames) and reports `EAC_INHIBITED` with error 3 or 4 on 56,000
 frames while not steering, so NAP's "inhibited is the idle state" deadlock does not apply in general; whether lateral can
@@ -321,8 +332,15 @@ Identical on every frame: `vEgo`, `vEgoRaw`, `aEgo`, steering angle, rate and to
 | `brakePressed`, `gasPressed`, `steerFaultPermanent` | under 0.01 % each | First frames of a segment (fail-closed start), EPAS status 4 at boot, and short runs around edges (longest: `gasPressed` for 17 frames in `00000008` seg 5, port pressed, NAP not). These were classified by where they occur, not examined one by one. |
 
 No field differs in the direction of the port being engaged, or reporting no fault, where NAP is not.
-This is `card` only. controlsd, selfdrived and radard have not been replayed against NAP, so "no new alerts or
-disengagements" is not shown beyond car state.
+
+card, radard, selfdrived and controlsd together, closed loop, against NAP on all 600 segments (`work/replay2/REPORT.md`).
+Plain `process_replay` cannot run StarPilot's selfdrived on these logs (they have no AOL safety wire), so each tree's own
+card, radard, selfdrived and controlsd are stepped in lockstep with its own libsafety as the panda, pandad's 10 Hz receipt
+modelled, and the interceptor's STATE derived from that tree's own `0x551` frames. The first run (`7ee687018`) found the
+two problems fixed in the seventh round above. On `c97447780`, keeping the logged panda faults: 0 `controlsMismatch`;
+port disengagements are driver actions at the same moments as NAP's; differences are the intended stricter ones (radar
+gating, seat-belt check, 360 deg steering cap, the panda's gas rule) or replay artifacts. Limits: open loop (BogPilot's
+drive), pandad modelled not run, pedal calibration not in the logs (factor 1.0 used), only 13 logged engagements.
 
 ## Checks removed
 
