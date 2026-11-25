@@ -724,7 +724,8 @@ class SelfdriveD:
         self.events.add(EventName.paramsdTemporaryError)
 
     # conservative HW alert. if the data or frequency are off, locationd will throw an error
-    if any((self.sm.frame - self.sm.recv_frame[s])*DT_CTRL > 10. for s in self.sensor_packets):
+    self.sensor_packets_stale = any((self.sm.frame - self.sm.recv_frame[s])*DT_CTRL > 10. for s in self.sensor_packets)
+    if self.sensor_packets_stale:
       self.events.add(EventName.sensorDataInvalid)
 
     if not REPLAY:
@@ -1317,6 +1318,10 @@ class SelfdriveD:
     for alert_type in DEPARTURE_ALERTS:
       if alert_type not in retained_types:
         self.AM.alerts.pop(alert_type, None)
+    if getattr(self, 'preap_bus1_tripped', False) and not getattr(self, 'sensor_packets_stale', False):
+      # Tesla pre-AP: the radar-bus bound is the only source of sensorDataInvalid; show its own text (display only).
+      from openpilot.starpilot.car.tesla.radar_bus_rate import relabel
+      alerts = relabel(alerts)
     self.AM.add_many(self.sm.frame, alerts)
     self.AM.process_alerts(self.sm.frame, clear_event_types)
     from openpilot.starpilot.audio.availability_warning import AvailabilityWarningDelivery

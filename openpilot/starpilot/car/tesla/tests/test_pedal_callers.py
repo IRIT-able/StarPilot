@@ -11,7 +11,7 @@ from openpilot.selfdrive.selfdrived.selfdrived import SelfdriveD, EventName, ET
 from openpilot.starpilot.aol.wire import SafetyState, PandaSlot, encode_safety
 from openpilot.starpilot.lateral.tests.test_lane_runtime import feed
 from openpilot.starpilot.tests.test_tesla_screen_integration import selfdrive_step
-from openpilot.starpilot.car.tesla.tests.pedal_fixture import actual_pedal_startup, configure_native, feedback_frame
+from openpilot.starpilot.car.tesla.tests.pedal_fixture import CALIBRATIONS, actual_pedal_startup, configure_native, feedback_frame
 
 
 # gas_wire: released on the tick pandad reads the panda, before the car's next 0x551 re-arms it, so the receipt says
@@ -24,9 +24,7 @@ from openpilot.starpilot.car.tesla.tests.pedal_fixture import actual_pedal_start
 BAD_WINDOWS = {'gas_wire': (126, 130), 'gas_state5': (124, 150), 'long_withheld': (130, 310)}
 
 
-@pytest.mark.parametrize('bus', [0, 2])
-@pytest.mark.parametrize('radar_mode', ['off', 'front', 'nosecone'])
-@pytest.mark.parametrize('fault', ['gas', 'brake', 'dropout', 'reverse', 'feedback_state', 'counter', 'channels', 'wrong_bus',
+FAULTS = ['gas', 'brake', 'dropout', 'reverse', 'feedback_state', 'counter', 'channels', 'wrong_bus',
                                    'eps', 'door', 'belt', 'eps_temporary',
                                    # carstate plumbing: broad brake and the DI brake bit into the engagement logic, hands-on
                                    # level 2, a missing chassis message, and a blocked command stream (latch, then a new pull)
@@ -37,13 +35,20 @@ BAD_WINDOWS = {'gas_wire': (126, 130), 'gas_state5': (124, 150), 'long_withheld'
                                    # one stalk pull only: lateral without pedal LONG must stay up, with no fault
                                    'single_pull',
                                    # radar-bus interrupt runaway while engaged: the live bus-1 bound soft-disables
-                                   'bus1_runaway'])
+                                   'bus1_runaway']
+
+
+@pytest.mark.parametrize('bus', [0, 2])
+@pytest.mark.parametrize('radar_mode', ['off', 'front', 'nosecone'])
+@pytest.mark.parametrize('fault,cal', [(fault, 'owner') for fault in FAULTS] +
+                         [(fault, 'unit') for fault in ('gas', 'brake', 'gas_state5', 'single_pull', 'bus1_runaway')])
 @pytest.mark.parametrize('aol', [False, True])
-def test_real_selected_pedal_fault_withdrawal_and_physical_reengagement(bus, radar_mode, fault, aol, monkeypatch):
+def test_real_selected_pedal_fault_withdrawal_and_physical_reengagement(bus, radar_mode, fault, aol, cal, monkeypatch):
   safety = libsafety_py.libsafety
   release = safety.set_safety_hooks(structs.CarParams.SafetyModel.allOutput, 0) != 0
   modelled = fault in ('gas_wire', 'gas_state5')
-  with actual_pedal_startup(bus, radar_mode, release, monkeypatch, always_on_lateral=aol or modelled) as (card, controls, calibration, cp_bytes):
+  with actual_pedal_startup(bus, radar_mode, release, monkeypatch, always_on_lateral=aol or modelled,
+                            calibration=cal) as (card, controls, calibration, cp_bytes):
     ci, word = card.CI, int(card.CP.safetyConfigs[0].safetyParam)
     configure_native(safety, calibration, word, cp_bytes)
     with patch('openpilot.selfdrive.selfdrived.selfdrived.REPLAY', False):
@@ -80,7 +85,7 @@ def test_real_selected_pedal_fault_withdrawal_and_physical_reengagement(bus, rad
           eps_error=15 if bad and fault == 'eps' else 0)
         if tick % 2 == 0 and not (bad and fault == 'dropout'):
           counter = 59 if bad and fault == 'counter' else tick // 2
-          incoming.append(feedback_frame(calibration, counter, di=8. if bad and gas else 0.,
+          incoming.append(feedback_frame(calibration, counter, di=8. if bad and gas else CALIBRATIONS[cal][2],
             state=1 if bad and fault == 'feedback_state' else
                   (0 if last_command is not None and tick - last_command <= 20 and tick - stream_start >= 4 else 5) if modelled else 0,
             bad_channel=bad and fault == 'channels', wrong_bus=bad and fault == 'wrong_bus'))
@@ -209,6 +214,8 @@ def test_real_selected_pedal_fault_withdrawal_and_physical_reengagement(bus, rad
         enabled_ticks.append((tick, sd.enabled))
         if EventName.sensorDataInvalid in sd.events.names:
           bus1_ticks.append(tick)
+          alerts_seen.update(f'shown:{entry.alert.alert_text_2}' for entry in sd.AM.alerts.values()
+                             if entry.active(sd.sm.frame) and entry.alert.alert_type.startswith('sensorDataInvalid/'))
         if sd.state_machine.state == log.SelfdriveState.OpenpilotState.softDisabling:
           soft_ticks.append(tick)
         if tick in (64, 65, 66, 74, 75, 76, 95, 100, 110, 140, 145, 150, 155, 160, 250):
@@ -236,6 +243,7 @@ def test_real_selected_pedal_fault_withdrawal_and_physical_reengagement(bus, rad
         assert all(enabled for t, enabled in enabled_ticks if bus1_ticks[0] <= t < soft_ticks[-1])
         assert not any(enabled for t, enabled in enabled_ticks if t > soft_ticks[-1] + 1), soft_ticks[-1]
         assert 720 <= soft_ticks[-1] < 760
+        assert 'shown:Radar Bus Fault' in alerts_seen and 'shown:Sensor Data Invalid' not in alerts_seen, alerts_seen
         assert not any(observed[t][0] or observed[t][1] or observed[t][4] for t in range(soft_ticks[-1] + 2, 800)), diagnostics
         return
       if fault == 'long_withheld':

@@ -417,11 +417,11 @@ def test_absolute_angle_cap_is_360_deg():
 class CarOnPanda:
   """PreAPPedalControl and PedalFeedback driven by the same frames as the registered safety hooks, with a model of the
   interceptor's STATE (0 from the first accepted command until 200 ms after the last, else 5)."""
-  def __init__(self, zero_torque=None, factor=1.):
+  def __init__(self, zero_torque=None, factor=1., zero=0., rest_di=0.):
     from types import SimpleNamespace
     from opendbc.car.tesla.preap.pedal_contract import PedalFeedback
     from opendbc.car.tesla.preap.pedal_control import PreAPPedalControl
-    self.rig = Rig(factor=factor).arm()
+    self.rig = Rig(factor=factor, zero=zero).arm()
     self.fb = PedalFeedback(self.rig.cal)
     self.pc = PreAPPedalControl(self.rig.cal)
     if zero_torque is not None:
@@ -439,7 +439,8 @@ class CarOnPanda:
                               cruise_buttons=0, prev_cruise_buttons=0, preap_cc_cancel_needed=False, preap_accel_max=1.,
                               pccEvent=None, pedal_command_failed=False)
     self.SimpleNamespace = SimpleNamespace
-    self.last_accept, self.sent, self.rejected, self.gas_di = None, [], [], 0.
+    self.rest_di = rest_di          # where the released pedal reads; the owner's calibration puts it 4.5 DI under coast
+    self.last_accept, self.sent, self.rejected, self.gas_di = None, [], [], rest_di
 
   def run(self, ticks):
     rig = self.rig
@@ -487,16 +488,24 @@ class CarOnPanda:
     return self
 
 
+# The owner's calibration (harness session: factor 0.973, saved zero 6.062, i.e. coast zero 6.062 - 1/0.973) with the
+# released pedal where the logged rest frames put it (median -4.55 DI); to be confirmed against /data/params_bogpilot.
+from opendbc.car.tesla.preap.pedal_contract import float32 as _f32
+OWNER = {'factor': _f32(0.973), 'zero': _f32(_f32(6.062) - 1.0 / _f32(0.973)), 'rest_di': -4.55}   # as pedal_preferences
+CALIBRATIONS = {'unit': {}, 'owner': OWNER}
+
+
+@pytest.mark.parametrize('calibration', CALIBRATIONS)
 @pytest.mark.parametrize('zero_torque', [None, 30.])
-def test_everything_the_car_controller_sends_is_accepted_by_its_panda(zero_torque):
-  car = CarOnPanda(zero_torque).run(300)
+def test_everything_the_car_controller_sends_is_accepted_by_its_panda(zero_torque, calibration):
+  car = CarOnPanda(zero_torque, **CALIBRATIONS[calibration]).run(300)
   assert car.sent[:1] == ['dis'] and car.sent.count('en') > 120
   assert not car.rejected, car.rejected[:3]
   assert not car.cs.pedal_command_failed and car.rig.safety.get_controls_allowed()
   # A short driver press: silence, then a disabled frame before the pedal is commanded again.
   car.gas_di = 6.
   car.run(6)
-  car.gas_di = 0.
+  car.gas_di = car.rest_di
   mark = len(car.sent)
   car.run(100)
   assert not car.rejected, car.rejected[:3]
@@ -505,18 +514,19 @@ def test_everything_the_car_controller_sends_is_accepted_by_its_panda(zero_torqu
   assert not car.cs.pedal_command_failed and car.rig.safety.get_controls_allowed()
 
 
+@pytest.mark.parametrize('calibration', CALIBRATIONS)
 @pytest.mark.parametrize('phase', [0, 1])
-def test_first_enabled_frame_survives_the_largest_logged_channel1_jump_with_the_panda_one_frame_ahead(phase):
+def test_first_enabled_frame_survives_the_largest_logged_channel1_jump_with_the_panda_one_frame_ahead(phase, calibration):
   # Logged on this interceptor at rest: channel 1 moves up to 67 counts between consecutive frames. Worst case for
   # channel 1: it alternates by 67 counts every frame and the panda judges the first enabled frame against a newer one.
-  car = CarOnPanda(zero_torque=30.)
+  car = CarOnPanda(zero_torque=30., **CALIBRATIONS[calibration])
   car.noise_fn = lambda tick: -33 if (tick // 2 + phase) % 2 else 34
   car.car_frame_lag = True
   for _ in range(8):                         # repeated engagements: run, a short driver press, release
     car.run(80)
     car.gas_di = 6.
     car.run(8)
-    car.gas_di = 0.
+    car.gas_di = car.rest_di
   car.run(80)
   assert car.sent.count('en') > 300 and not car.rejected, car.rejected[:3]
   assert not car.cs.pedal_command_failed and car.rig.safety.get_controls_allowed()
@@ -693,16 +703,18 @@ def test_without_aol_feedback_faults_still_withdraw_control(monkeypatch, fault):
 
 
 
-@pytest.mark.parametrize('factor,coast', [(1., 30.), (1.25, 30.), (1., 0.)])
-def test_first_enabled_frames_over_logged_rest_frames_with_the_panda_one_frame_ahead(factor, coast):
+@pytest.mark.parametrize('factor,coast,zero', [(1., 30., 0.), (1.25, 30., 0.), (1., 0., 0.),
+                                               (OWNER['factor'], 30., OWNER['zero']), (OWNER['factor'], -8., OWNER['zero'])])
+def test_first_enabled_frames_over_logged_rest_frames_with_the_panda_one_frame_ahead(factor, coast, zero):
   # 1,790 consecutive logged 0x552 frames at rest (00000021 seg 5, working hardware), replayed in order. About 35
   # engagements, each judged by the panda against a frame one newer than the car's. Coast 30: first frame at
-  # measured + 1.5 DI; coast 0: at the measured pedal (NAP's seed at low speed).
+  # measured + 1.5 DI; coast 0 at factor 1 / zero 0 and coast -8 at the owner's calibration (the released pedal reads about
+  # -4.5 DI there): a coast point at or under the pedal, so the first frame is the measured pedal (NAP's seed).
   import json
   import os
   with open(os.path.join(os.path.dirname(__file__), 'tesla_preap_pedal_rest_frames.json')) as f:
     logged = json.load(f)
-  car = CarOnPanda(zero_torque=coast, factor=factor)
+  car = CarOnPanda(zero_torque=coast, factor=factor, zero=zero)
   car.logged = logged
   car.car_frame_lag = True
   engagements = 0
@@ -714,3 +726,26 @@ def test_first_enabled_frames_over_logged_rest_frames_with_the_panda_one_frame_a
     car.run(40)                              # released long enough for the interceptor to time out again
   assert engagements >= 30
   assert car.sent.count('en') > 25 * engagements and not car.rejected, car.rejected[:3]
+
+
+@pytest.mark.parametrize('rest_di', [-6.6, -7.5, -9.])
+def test_owner_calibration_pedal_reading_under_minus_6_5_di_starts_at_the_panda_floor(rest_di):
+  # Not logged (lowest -6.08 DI), but possible: the seed (measured + 1.5) is under -5 DI and is clamped to the panda's
+  # -5 DI floor, i.e. up to 4 DI above the pedal, inside the panda's +5 DI first-step limit.
+  car = CarOnPanda(zero_torque=30., **dict(OWNER, rest_di=rest_di)).run(200)
+  assert car.sent.count('en') > 80 and not car.rejected, car.rejected[:3]
+  assert not car.cs.pedal_command_failed and car.rig.safety.get_controls_allowed()
+
+
+def test_owner_calibration_rest_spike_over_the_gas_threshold_is_a_driver_press_not_a_fault():
+  # A rest reading above 2 DI (logged max 1.28 at this calibration) is a gas press for both the car and the panda: the
+  # stream pauses with a disabled frame and resumes, nothing rejected.
+  car = CarOnPanda(zero_torque=30., **OWNER).run(150)
+  car.gas_di = 2.3
+  car.run(4)
+  car.gas_di = car.rest_di
+  mark = len(car.sent)
+  car.run(150)
+  assert not car.rejected, car.rejected[:3]
+  after = car.sent[mark:]
+  assert after and after[0] == 'dis' and 'en' in after and car.rig.safety.get_controls_allowed()

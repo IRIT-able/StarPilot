@@ -273,7 +273,7 @@ Replaying 1,790 consecutive logged rest frames (`opendbc/safety/tests/tesla_prea
 arrives (likely 30-50 % of engagements). A rejected first frame applies no throttle, and the echo watchdog ends the
 engagement within about 120 ms, so the cost is a nuisance fault, not a safety problem. Above a factor of about 2 the
 panda's first-frame window (StarPilot's own check, in neither reference) is narrower than this interceptor's noise
-whatever the car does. **The owner's calibration factor is not in the logs.** If it is above about 1.5, engagements will
+whatever the car does. (Superseded: the owner's factor is now known, 0.973; see "Owner decisions" below.) If it were above about 1.5, engagements would
 sometimes fault at once; widening that panda window would be the fix, and that is the owner's decision.
 
 `opendbc/safety/tests/test_tesla_preap_pedal_faults.py::test_everything_the_car_controller_sends_is_accepted_by_its_panda`
@@ -295,15 +295,47 @@ the panda's own LONG request bit, and a panda that clears its whole request mask
 
 #### Owner decisions, 2026-11-24
 
-- **Pedal calibration. SUPERSEDED, pending confirmation:** the harness session has corrected its derivation; zero is now
-  about 6.05, not 1.47 (factor not yet reported as changed). Nothing that depends on the pedal zero is final until the
-  owner gives the confirmed values; then the first-frame window and the car code that uses the calibration offset are
-  re-checked and their tests re-run. Original note: inferred from manual driving in the logs by the harness session (BogPilot's definitions,
-  `DI = (gas - Zero) * Factor`, Zero = gas at the first `DI_pedalPos >= 0.4 %`): factor median **0.973** (IQR 0.970-0.975),
-  zero median **1.47** (IQR 1.34-1.83), stable across 24 drives and both remotes (`~/op-harness/DESIGN.md` section 5.5,
-  read-only). At this factor the panda's first-frame window is wider than the interceptor's rest noise (the 1.0 row of the
-  table above), and 0.973 is inside the accepted range (0.82-3.0). The panda check stays as it is. **To be confirmed against
-  the device's saved values in `/data/params_bogpilot` once the owner has the device.**
+- **Pedal calibration (confirmed by the harness session, 2026-11-25).** As BogPilot's
+  `calib.py` consumes them (`~/op-harness/DESIGN.md` section 5.5, `models/pedal_calib.json`, read-only):
+  `PedalCalibZero` = **6.062** (IQR 6.054-6.074, field `zero_gp`, INTERCEPTOR_GAS / GAS_COMMAND DBC units) and
+  `PedalCalibFactor` = **0.973** (IQR 0.970-0.975, DI % per unit; assumed physical slope, not separately measured). The
+  earlier 1.47 was the physical gas-onset point (`zero_onset`) and is superseded. Saved in StarPilot as
+  `NAPPedalCalibZero` / `NAPPedalCalibFactor`. **To be confirmed against the device's `/data/params_bogpilot`.**
+  - Coast-zero offset: the port applies `zero - 1/factor` (`pedal_preferences.py`), exactly BogPilot's
+    `coast_pedal_zero` (`calib.py:175-179`) and NAP's `pedal_zero`: 6.062 - 1/0.973 = **5.034** units, raw 549 on
+    channel 1. No code change.
+  - Where the released pedal sits: the 1,790 logged rest frames read median **-4.55 DI** (range -6.08 to +1.28), so
+    rest is 4.5 DI below coast and always under the panda's 2 DI gas threshold. (At the earlier test values, factor
+    1.0 / zero 1.0 or 0.01, rest read about 0 DI and up to +6.9 DI, i.e. over the gas threshold on noise.)
+  - First-frame window: the car clamps every command, the first included, to at least -5 DI, the panda's floor
+    (`pedal_control.py:219, 271`), so the low resting pedal cannot put a frame under it. On 257,578 consecutive logged
+    0x552 pairs (routes 00000021, 00000024, 0000002a; panda one frame newer than the car), a first enabled frame built as
+    the car builds it is refused on 0.019 % (coast point 0 DI) and 0.034 % (coast point 30 DI) of the 98,911 pairs on
+    which an enabled frame is allowed. Every refusal is a pedal moving 4-5 DI between two frames 20 ms apart (a foot on
+    the pedal), not rest noise: at this calibration the "at or below 2 DI" range spans 6.5 DI of pedal travel instead of
+    about 2, so more such pairs count. A refused first frame applies no throttle; the engagement ends within about
+    120 ms. The panda check stays as it is. Script: `work/calib/first_frame.py`.
+  - Tests at this calibration: `test_pedal_calibration_offset.py` (coast zero, raw 549, logged rest under 2 DI);
+    `test_tesla_preap_pedal_faults.py` car-on-panda cases, including the logged rest-frame replay, now also run with it
+    and the pedal released at -4.55 DI; the card-level fixture (`pedal_fixture.py`, every `test_pedal_callers.py` case)
+    now uses it, and five fault cases also still run at factor 1.0 / zero 1.0. Review round 9 additions: a released pedal
+    read under -6.5 DI starts at the panda's -5 DI floor and is accepted (the clamp is mutation-checked); a rest spike
+    just over the 2 DI gas threshold is handled as a driver press, nothing refused; the seed = measured-pedal branch at
+    this calibration (coast point -8 DI). Open (review N1): the logged rest maximum (raw 575, +1.28 DI) is about 15 counts
+    under the 2 DI gas threshold; BogPilot keeps the saved zero at least rest p99 + 0.25 at capture, the port has no
+    load-time check like it. Check rest noise on the first drive.
+  - Safety review of the calibration and relabel round: NON-BLOCKING ONLY (two passes). Still open: the 2 DI gas
+    threshold is pinned in tests at the unit calibration only (car-side at the owner's); the -5 DI clamp is tested with a
+    steady reading, not with 0x552 jitter and the panda one frame ahead (fails safe as a pedal fault); five caller faults
+    still run at factor 1 through card and selfdrived, the rest only at the owner's calibration (the panda-level 'unit'
+    cases cover factor 1); the IMU going stale after "Radar Bus Fault" is already showing is untested; the two new texts
+    have no translations.
+  - Closed-loop replay, all 600 segments, both trees at this calibration (`work/replay2/out_cal`, `tables_cal.md`;
+    the earlier runs used factor 1.0 / zero 0.01): engagements 12 port / 13 NAP and disengagements 3 / 5, all driver
+    actions, as before; 0 `controlsMismatch`, 0 `sensorDataInvalid`; refused 0x551 frames 2 -> **0**. Longitudinal
+    time rose from 15,014 to **27,200** frames for the port and from 20,406 to 27,312 for NAP (now within 0.4 % of each
+    other), and NAP's gas-override lateral episodes fell from 6 to 1: at the placeholder calibration the resting
+    pedal's noise read above the 2 DI gas threshold, which both trees treated as a driver press.
 - **Radar-bus interrupt-rate fault: exemption kept, threshold not changed.** The rates are logged per IRQ
   (`pandaStates[].canState1.irq0CallRate/irq1CallRate`, 600 segments, 698,000 samples). With the car's safety mode active
   (more than 2 s after leaving ELM327) bus 1 runs at a median of 1,315 interrupts/s per IRQ, 1,564 at most; the limit is
@@ -323,10 +355,18 @@ the panda's own LONG request bit, and a panda that clears its whole request mask
 
 | Change | Behavior | Evidence |
 |---|---|---|
-| **Live radar-bus interrupt-rate bound** (`starpilot/car/tesla/radar_bus_rate.py`, hooked in `selfdrived`). Stands in for the exempt panda bit once this car's safety mode is active. Neither reference has it. | Reads the per-IRQ call rates pandad reports for bus 1 (`pandaStates[0].canState1.irq{0,1,2}CallRate`, each the firmware's count over its previous 1 s window). Only for the admitted pre-AP profiles, and only while the panda reports exactly the configured safety model and param; ignores the first 2.1 s after the mode change (the windows that still count pre-mode traffic). Trips when the highest of the three rates stays above **4,000/s** (2.5 times the logged maximum) for 1.3 s, i.e. in two consecutive firmware windows (one window stays visible for at most 1.0 s in the logs, two for 1.8 s); clears after 1.3 s back under the bound. On trip: `sensorDataInvalid` (no entry, soft disable on both axes; not in the AOL longitudinal-only or availability lists). With pedal cruise engaged: the ordinary 3 s soft disable, never an immediate disable. With AOL lateral only (selfdrived not engaged): StarPilot withdraws AOL steering at once on any soft-disable event, with "TAKE CONTROL IMMEDIATELY / Sensor Data Invalid" (existing AOL behaviour; **owner decision 2026-11-24: kept**, AOL semantics are not changed in this port). The event text is shared with the IMU check, so the trip also writes its own log entry, `tesla_preap_bus1_interrupt_rate`. | `test_preap_radar_bus_rate.py`: normal and exactly-at-bound rates never trip; sustained runaway on each IRQ at 4,001, 8,000 and 21,551/s trips and recovers; spikes inside one window (0.1-0.9 s, any strength) and a 0.24 s storm-level spike across a window boundary do not trip; the logged identification-storm shape across the mode change does not trip, a 0.3 s one can (documented); report jitter (-20/+60 ms) and 5 % missed reports: one window never trips, two always do; after a mode drop mid-drive the settling applies again; other modes, other cars and unqualified profiles never trip; real selfdrived, stock-cruise AOL. `test_pedal_callers.py` `bus1_runaway` (real card, selfdrived, controlsd, pedal cruise engaged, 12 cases): trip 1.30-1.32 s after the reported rate goes up, 3 s soft disable, no immediate disable, a new double pull during the trip does not engage, nothing commanded after the disable. 14 mutations, all caught (the first run missed two; both tests were fixed). |
+| **Live radar-bus interrupt-rate bound** (`starpilot/car/tesla/radar_bus_rate.py`, hooked in `selfdrived`). Stands in for the exempt panda bit once this car's safety mode is active. Neither reference has it. | Reads the per-IRQ call rates pandad reports for bus 1 (`pandaStates[0].canState1.irq{0,1,2}CallRate`, each the firmware's count over its previous 1 s window). Only for the admitted pre-AP profiles, and only while the panda reports exactly the configured safety model and param; ignores the first 2.1 s after the mode change (the windows that still count pre-mode traffic). Trips when the highest of the three rates stays above **4,000/s** (2.5 times the logged maximum) for 1.3 s, i.e. in two consecutive firmware windows (one window stays visible for at most 1.0 s in the logs, two for 1.8 s); clears after 1.3 s back under the bound. On trip: `sensorDataInvalid` (no entry, soft disable on both axes; not in the AOL longitudinal-only or availability lists). With pedal cruise engaged: the ordinary 3 s soft disable, never an immediate disable. With AOL lateral only (selfdrived not engaged): StarPilot withdraws AOL steering at once on any soft-disable event, with "TAKE CONTROL IMMEDIATELY / Sensor Data Invalid" (existing AOL behaviour; **owner decision 2026-11-24: kept**, AOL semantics are not changed in this port). The event is shared with the IMU check; the trip writes its own log entry, `tesla_preap_bus1_interrupt_rate`, and (owner request, 2026-11-25) the driver sees its own text, "Radar Bus Fault" ("TAKE CONTROL IMMEDIATELY / Radar Bus Fault", "openpilot Unavailable / Radar Bus Fault", "Radar Bus Fault / Radar CAN Bus Overloaded"). Display only: `radar_bus_rate.relabel` copies the `sensorDataInvalid` alerts just before the alert manager, only while the bus-1 bound is tripped and the IMU check is not also firing (then the generic text stays). An alert that is already showing keeps its text while it stays up, so the source that raised the event first decides it (both texts name a real cause); the event, its no-entry and soft-disable behaviour and the AOL handling are unchanged. A separate event name would need a schema enum change (reviewed-schema fixtures, upstream-sync conflicts), so it was not used. Detection delay 1.4-3.5 s accepted by the owner, 2026-11-25. | `test_preap_radar_bus_rate.py`: normal and exactly-at-bound rates never trip; sustained runaway on each IRQ at 4,001, 8,000 and 21,551/s trips and recovers; spikes inside one window (0.1-0.9 s, any strength) and a 0.24 s storm-level spike across a window boundary do not trip; the logged identification-storm shape across the mode change does not trip, a 0.3 s one can (documented); report jitter (-20/+60 ms) and 5 % missed reports: one window never trips, two always do; after a mode drop mid-drive the settling applies again; other modes, other cars and unqualified profiles never trip; real selfdrived, stock-cruise AOL. `test_pedal_callers.py` `bus1_runaway` (real card, selfdrived, controlsd, pedal cruise engaged, 12 cases): trip 1.30-1.32 s after the reported rate goes up, 3 s soft disable, no immediate disable, a new double pull during the trip does not engage, nothing commanded after the disable. 14 mutations, all caught (the first run missed two; both tests were fixed). |
 | **Detection delay** | The panda reports a window's count only after the window ends, and a trip needs two windows. From the start of a storm-level runaway to the event: **about 1.4-2.5 s** (up to about 3.5 s for a rate only just above the bound), then the 3 s soft-disable countdown when engaged. This is longer than the "about 1 s" the owner asked for: a window's count only exists once the window has ended, and telling a sustained runaway from a brief spike needs a second window. A strong burst shorter than about 0.27 s never trips; one of 0.3-2 s may or may not, depending on how it falls across the windows. The panda bit it replaces was instantaneous, but it was latched on every drive anyway. | Unit tests bound the delay. Logged pandaStates timing (333,000 car-mode reports): 0.100 s median interval, no gap over 150 ms; one window visible for 0.9 s (at most 1.0 s, 7 of 33,000 windows). |
 | **Validation, no false trips** | 0 trips | Offline, the monitor over every logged pandaState (43 routes, 333,490 car-mode reports, 3,916 of them in the first 10 s after a switch into car mode): 0 trips. Had the identification storms happened in car mode, 11 of them would have tripped. Closed-loop replay of all 600 segments (`work/replay2/out_r8`, logged bus-1 rates passed through, zeroed while the logged panda was still in ELM327): 0 `sensorDataInvalid`, and no other change against the previous run (same 13 engagements, same 4 disengagements, no event or alert onset differences after the first 3 s). The replay ran at the first sustain value (1.05 s); 1.3 s can only remove trips. The replay runs the owner's pedal profile, so the stock-cruise warning path is covered by the tests only. |
 | **Stock-cruise radar warnings** (`card.py` -> `pedal_events.stock_radar_companion`; `stock_events.StockCruiseConsumer` polls a radar-only `PedalStatusConsumer`). | With the radar configured (stock profiles 2 and 6), card publishes the receiver status in `starpilotCarState` as in pedal mode, and selfdrived shows "Radar Not Ready" / "Radar Silent", "Using Camera Lead", as a warning only; the pedal chimes and regen prompt stay pedal-only. Profile 0 (no radar) publishes nothing and shows nothing. Pedal profiles unchanged. | `test_preap_stock_radar_warning.py`: real receiver states (not ready, healthy, silent) for 2 and 6; 0 silent; pedal profiles keep their own path; stale, re-stamped or invalid status not shown; real selfdrived with AOL lateral: the warning appears, steering stays, no soft-disable, immediate-disable or no-entry event. |
+
+**Possible future improvement (owner, 2026-11-25: leave as is for now, revisit after real drives):** the
+identification storms come from openpilot's VIN query (`0x7DF 03 22 F1 90`) and the firmware queries going out on bus 1
+in ELM327 mode before the radar is up; nothing acknowledges them. StarPilot already has a Tesla path that queries bus 0
+only (`car_helpers.fingerprint(known_tesla_bus0)` / `tesla.discovery.normal_bus0_topology`), but its passive layouts need
+the AP1 camera frames 0x488 / 0x2B9 on bus 2, which this car does not have (bus 2 carries only the pedal's 0x552). A
+pre-AP layout (the HW1 bus-0 frames, no DAS frames on bus 2) would route this car to the bus-0 path and stop the storms at
+the source; it touches shared identification code and needs proof that the car still identifies correctly from bus 0.
 
 Safety review of the eighth round: NON-BLOCKING ONLY (two passes). Changed after the first pass: sustain 1.05 -> 1.3 s
 (report jitter), real delay documented, separate log entry on a trip, tests for jitter, missed reports, a boundary burst,

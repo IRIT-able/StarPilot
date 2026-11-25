@@ -183,8 +183,10 @@ def test_real_selfdrived_stock_cruise_aol_runaway_is_a_takeover_warning_not_an_i
         else:
           assert tripped and not command.latActive, tick
     assert trip is not None and SUSTAIN_NS <= trip - onset < SUSTAIN_NS + S // 10     # first report at or past 1.3 s
-    assert any(entry.alert.alert_text_1 == 'TAKE CONTROL IMMEDIATELY' and entry.alert.alert_text_2 == 'Sensor Data Invalid'
+    assert any(entry.alert.alert_text_1 == 'TAKE CONTROL IMMEDIATELY' and entry.alert.alert_text_2 == 'Radar Bus Fault'
                for entry in sd.AM.alerts.values() if entry.active(sd.sm.frame))
+    assert not any('Sensor Data Invalid' in (entry.alert.alert_text_1, entry.alert.alert_text_2)
+                   for entry in sd.AM.alerts.values() if entry.active(sd.sm.frame))
 
 
 @pytest.mark.parametrize('seed', range(20))
@@ -225,3 +227,77 @@ def test_a_mode_drop_mid_drive_settles_again_before_counting(cp):
     assert not monitor.update([state(STORM, model, param)], t); t += S // 10
   t = back + SETTLE_NS + SUSTAIN_NS
   assert monitor.update([state(STORM, model, param)], t)
+
+
+def test_relabel_copies_and_only_touches_sensor_data_invalid():
+  from opendbc.car.structs import car
+  from openpilot.starpilot.car.tesla.radar_bus_rate import relabel
+  from openpilot.selfdrive.selfdrived.events import Events
+  cp = car.CarParams.new_message()
+  cs = car.CarState.new_message()
+  events = Events()
+  events.add(EventName.sensorDataInvalid)
+  events.add(EventName.doorOpen)
+  originals = {}
+  for kinds in ([ET.SOFT_DISABLE], [ET.NO_ENTRY], [ET.PERMANENT]):
+    alerts = events.create_alerts(kinds, [cp, cs, None, False, 300, 1])
+    if kinds == [ET.PERMANENT]:                       # created only after its 1 s delay; take the shared object as the AM would
+      import copy
+      shown = copy.copy(EVENTS[EventName.sensorDataInvalid][ET.PERMANENT])
+      shown.alert_type = 'sensorDataInvalid/permanent'
+      alerts = [shown]
+    before = [(a.alert_type, a.alert_text_1, a.alert_text_2) for a in alerts]
+    out = relabel(alerts)
+    assert [(a.alert_text_1, a.alert_text_2) for a in alerts] == [b[1:] for b in before]      # originals untouched
+    for a, b in zip(out, before):
+      source = next(x for x in alerts if x.alert_type == b[0])
+      for field in ('alert_type', 'priority', 'audible_alert', 'visual_alert', 'alert_status', 'alert_size', 'duration',
+                    'creation_delay', 'event_type'):
+        assert getattr(a, field) == getattr(source, field), field           # presentation text only
+      if b[0].startswith('sensorDataInvalid/'):
+        assert 'Sensor Data Invalid' not in (a.alert_text_1, a.alert_text_2)
+        assert 'Radar Bus Fault' in (a.alert_text_1, a.alert_text_2)
+        originals[b[0]] = (a.alert_text_1, a.alert_text_2)
+      else:
+        assert (a.alert_text_1, a.alert_text_2) == b[1:]
+  assert originals == {'sensorDataInvalid/softDisable': ('TAKE CONTROL IMMEDIATELY', 'Radar Bus Fault'),
+                       'sensorDataInvalid/noEntry': ('openpilot Unavailable', 'Radar Bus Fault'),
+                       'sensorDataInvalid/permanent': ('Radar Bus Fault', 'Radar CAN Interrupt Rate Too High')}
+  assert EVENTS[EventName.sensorDataInvalid][ET.PERMANENT].alert_text_1 == 'Sensor Data Invalid'          # shared object
+
+
+def test_real_selfdrived_keeps_the_generic_text_when_the_imu_check_also_fires():
+  from contextlib import ExitStack
+  from unittest import mock
+  from openpilot.starpilot.car.tesla.tests.test_preap_radar_end_to_end import aol_callers
+  with ExitStack() as cleanup:
+    sd, _, step = aol_callers(cleanup)
+    for tick in (0, 1):
+      step(tick, native_request_long=False, panda_controls_allowed=False)
+    clock, original, imu = [50 * S], sd.update_events, [False]
+
+    def update(cs):
+      clock[0] += S // 10
+      states = []
+      for panda in sd.sm['pandaStates']:
+        builder = panda.as_builder()
+        builder.canState1.irq0CallRate = STORM
+        states.append(builder.as_reader())
+      sd.sm.data['pandaStates'] = states
+      sd.sm.updated['pandaStates'] = True
+      sd.sm.logMonoTime['pandaStates'] = clock[0]
+      # The IMU goes silent (20 s) on the very frame the bound trips, so both raise sensorDataInvalid first together.
+      monitor = sd.preap_bus1_rate
+      if monitor.tripped or (monitor.above_since and clock[0] - monitor.above_since >= SUSTAIN_NS):
+        imu[0] = True                                # this report trips the bound
+      if imu[0]:
+        sd.sm.recv_frame['accelerometer'] = sd.sm.frame - 2000
+      original(cs)
+      assert sd.sensor_packets_stale == imu[0] and sd.preap_bus1_tripped == imu[0]
+      assert (EventName.sensorDataInvalid in sd.events.names) == imu[0], clock[0]
+    with mock.patch.object(sd, 'update_events', side_effect=update):
+      for tick in range(2, 45):
+        step(tick, native_request_long=False, panda_controls_allowed=False)
+    assert sd.preap_bus1_tripped and EventName.sensorDataInvalid in sd.events.names
+    texts = {(entry.alert.alert_text_1, entry.alert.alert_text_2) for entry in sd.AM.alerts.values() if entry.active(sd.sm.frame)}
+    assert ('TAKE CONTROL IMMEDIATELY', 'Sensor Data Invalid') in texts and not any('Radar Bus Fault' in t for t in texts)

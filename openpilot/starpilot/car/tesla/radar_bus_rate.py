@@ -33,6 +33,28 @@ def bus1_rate(panda_state):
   return max(int(state.irq0CallRate), int(state.irq1CallRate), int(state.irq2CallRate))
 
 
+RELABEL_FROM = 'Sensor Data Invalid'
+RELABEL_TO = 'Radar Bus Fault'
+RELABEL_DETAIL = 'Radar CAN Interrupt Rate Too High'
+
+
+def relabel(alerts):
+  """Presentation only: the trip raises sensorDataInvalid (its no-entry and soft-disable behaviour unchanged). selfdrived
+  calls this only while the bus-1 bound alone raised it, so the driver sees the actual cause. Copies; never edits the
+  shared Alert objects in EVENTS."""
+  import copy
+  out = []
+  for alert in alerts:
+    if str(getattr(alert, 'alert_type', '')).startswith('sensorDataInvalid/'):
+      alert = copy.copy(alert)
+      if alert.alert_text_1 == RELABEL_FROM:
+        alert.alert_text_1, alert.alert_text_2 = RELABEL_TO, RELABEL_DETAIL
+      elif alert.alert_text_2 == RELABEL_FROM:
+        alert.alert_text_2 = RELABEL_TO
+    out.append(alert)
+  return out
+
+
 def _log_trip(rate):
   try:
     from openpilot.common.swaglog import cloudlog

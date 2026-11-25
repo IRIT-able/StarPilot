@@ -40,3 +40,22 @@ def test_saved_onset_at_the_command_limit_is_refused(monkeypatch):
   assert settings(monkeypatch, b'1.0', b'101.0').valid
   assert not settings(monkeypatch, b'1.0', b'101.7').valid
   assert not settings(monkeypatch, b'1.0', b'102.3').valid
+
+
+OWNER_FACTOR, OWNER_ZERO = b'0.973', b'6.062'   # harness session, models/pedal_calib.json (factor, zero_gp); to be
+                                                 # confirmed against the device's /data/params_bogpilot
+
+
+def test_owner_calibration_coast_zero_and_logged_rest_pedal(monkeypatch):
+  import json, os
+  from opendbc.car.tesla.preap.pedal_contract import D, M1
+  result = settings(monkeypatch, OWNER_FACTOR, OWNER_ZERO)
+  assert result.valid and result.enabled
+  cal = result.calibration
+  assert cal.zero == pytest.approx(6.062 - 1.0 / 0.973, abs=1e-4) == pytest.approx(5.0343, abs=1e-4)   # BogPilot calib.py
+  assert round((cal.zero - D) / M1) == 549                                         # coast point, raw channel 1
+  path = os.path.join(os.path.dirname(pedal_preferences.__file__), '..', '..', '..', '..', 'opendbc_repo', 'opendbc',
+                      'safety', 'tests', 'tesla_preap_pedal_rest_frames.json')
+  rest = [cal.di(one * M1 + D) for one, _ in json.load(open(os.path.normpath(path)))]
+  # Logged resting pedal (1,790 frames): well below the panda's 2 DI gas threshold and inside its -5 DI floor margin.
+  assert max(rest) < 2.0 and -6.2 < min(rest) and -4.7 < sorted(rest)[len(rest) // 2] < -4.4

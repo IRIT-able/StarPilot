@@ -15,6 +15,12 @@ from openpilot.selfdrive.car.card import Car
 from openpilot.selfdrive.controls.controlsd import Controls
 
 
+OWNER_FACTOR, OWNER_ZERO = 0.973, 6.062
+REST_DI = -4.55        # the released pedal at the owner's calibration (median of the logged rest frames)
+# name -> (saved factor, saved zero, where the released pedal reads in DI). 'unit' is the earlier fixture calibration.
+CALIBRATIONS = {'owner': (OWNER_FACTOR, OWNER_ZERO, REST_DI), 'unit': (1.0, 1.0, 0.0)}
+
+
 def native_words(calibration, word, cp_bytes):
   prefix = struct.pack('<HHHHff', 1, calibration.bus, word, 0xD051, calibration.factor, calibration.zero)
   return struct.unpack('<24H', prefix + hashlib.sha256(cp_bytes).digest())
@@ -45,7 +51,7 @@ def feedback_frame(calibration, counter, *, di=0., state=0, wrong_bus=False, bad
 
 
 @contextmanager
-def actual_pedal_startup(bus, radar_mode, release, monkeypatch, always_on_lateral=False):
+def actual_pedal_startup(bus, radar_mode, release, monkeypatch, always_on_lateral=False, calibration='owner'):
   from opendbc.car import car_helpers
   from openpilot.selfdrive.car import card as card_module
   from openpilot.starpilot.car.tesla.pedal_startup import KEY, decode
@@ -59,8 +65,10 @@ def actual_pedal_startup(bus, radar_mode, release, monkeypatch, always_on_latera
                        ('NAPPedalEnabled', True), ('NAPPedalCalibDone', True), ('IsReleaseBranch', release)):
       params.put_bool(key, value, block=True)
     params.put('NAPPedalCanBus', bus, block=True)
-    params.put('NAPPedalCalibFactor', 1.0, block=True)
-    params.put('NAPPedalCalibZero', 1.0, block=True)  # saved gas-onset point; 0 DI is one unit below it
+    # The owner's calibration (harness session, models/pedal_calib.json: factor, zero_gp), saved as BogPilot/NAP store it;
+    # 0 DI (coast) is 1/factor below the saved zero. To be confirmed against the device's /data/params_bogpilot.
+    params.put('NAPPedalCalibFactor', CALIBRATIONS[calibration][0], block=True)
+    params.put('NAPPedalCalibZero', CALIBRATIONS[calibration][1], block=True)
     params.put('TeslaPreAPRadarConfig', {'version': 1, 'mode': radar_mode, 'offset': .25}, block=True)
     observed = (CAR.TESLA_MODEL_S_PREAP, fingerprint, '0' * 17, [], structs.CarParams.FingerprintSource.can, True)
     with patch.object(car_helpers, 'fingerprint', return_value=observed), \
