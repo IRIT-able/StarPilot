@@ -6,7 +6,7 @@ import pytest
 from opendbc.car import structs
 from opendbc.car.tesla.tests.preap_stream import PreAPStream
 from opendbc.safety.tests.libsafety import libsafety_py
-from openpilot.cereal import messaging
+from openpilot.cereal import log, messaging
 from openpilot.selfdrive.selfdrived.selfdrived import SelfdriveD, EventName, ET
 from openpilot.starpilot.aol.wire import SafetyState, PandaSlot, encode_safety
 from openpilot.starpilot.lateral.tests.test_lane_runtime import feed
@@ -35,7 +35,9 @@ BAD_WINDOWS = {'gas_wire': (126, 130), 'gas_state5': (124, 150), 'long_withheld'
                                    # press after which the interceptor still reports its STATE 5 timeout once re-acquired
                                    'gas_wire', 'gas_state5', 'long_withheld',
                                    # one stalk pull only: lateral without pedal LONG must stay up, with no fault
-                                   'single_pull'])
+                                   'single_pull',
+                                   # radar-bus interrupt runaway while engaged: the live bus-1 bound soft-disables
+                                   'bus1_runaway'])
 @pytest.mark.parametrize('aol', [False, True])
 def test_real_selected_pedal_fault_withdrawal_and_physical_reengagement(bus, radar_mode, fault, aol, monkeypatch):
   safety = libsafety_py.libsafety
@@ -51,7 +53,7 @@ def test_real_selected_pedal_fault_withdrawal_and_physical_reengagement(bus, rad
     receipt = None
     stale_wire = fault == 'gas_wire'
     gas = fault in ('gas', 'gas_wire', 'gas_state5')
-    mismatch_ticks, enabled_ticks = [], []
+    mismatch_ticks, enabled_ticks, bus1_ticks, soft_ticks = [], [], [], []
     selfdriven, observed, diagnostics = {}, {}, {}
     alerts_seen = set()
     radar_statuses = set()
@@ -60,7 +62,7 @@ def test_real_selected_pedal_fault_withdrawal_and_physical_reengagement(bus, rad
     # the commands resume (40 ms here). Used by the two cases modelled on the replayed drives.
     last_command, stream_start = None, None
     try:
-      for tick in range(310):
+      for tick in range(800 if fault == 'bus1_runaway' else 310):
         now = 2_000_000_000 + tick * 10_000_000
         # Fault window; the two cases modelled on the replayed drives are described at BAD_WINDOWS.
         start, end = BAD_WINDOWS.get(fault, (96 if fault == 'echo_loss' else 120,
@@ -68,7 +70,8 @@ def test_real_selected_pedal_fault_withdrawal_and_physical_reengagement(bus, rad
         bad = start <= tick < end
         brake = 2 if bad and fault == 'brake' else 0 if bad and fault == 'brake_status_0' else 3 if bad and fault == 'brake_status_3' else 1
         lever = (2 if tick == 65 else 0) if fault == 'single_pull' else \
-                2 if tick in (65, 75) or tick in (220, 230) and fault != 'long_withheld' else 1 if tick == 275 else 0
+                2 if tick in (65, 75) or tick in (220, 230) and fault not in ('long_withheld', 'bus1_runaway') else \
+                1 if tick == 275 and fault != 'bus1_runaway' else 2 if fault == 'bus1_runaway' and tick in (770, 780) else 0
         incoming = stream.frames(tick, lever=lever, cruise=1, brake=brake, di_brake=int(bad and fault == 'di_brake'),
           hands=2 if bad and fault == 'hands2' else 0, omit='ESP_B' if bad and fault == 'can_missing' else None,
           gear=2 if bad and fault == 'reverse' else 4,
@@ -102,6 +105,8 @@ def test_real_selected_pedal_fault_withdrawal_and_physical_reengagement(bus, rad
         panda.pandaStates[0].alternativeExperience = 32
         panda.pandaStates[0].controlsAllowed = bool(safety.get_controls_allowed())
         panda.pandaStates[0].safetyRxChecksInvalid = not bool(safety.safety_config_valid())
+        # Bus-1 interrupt rate as pandad reports it: the logged normal level, or a storm-level runaway from tick 300.
+        panda.pandaStates[0].canState1.irq0CallRate = 21_551 if fault == 'bus1_runaway' and tick >= 300 else 1_315
         peers.append(panda.as_reader())
         if receipt is not None:
           peers.append(receipt.as_reader())
@@ -202,6 +207,10 @@ def test_real_selected_pedal_fault_withdrawal_and_physical_reengagement(bus, rad
           assert not command.latActive, 'temporary EPS inhibition must suppress lateral commands'
         observed[tick] = (bool(command.longActive), enabled_pedal, bool(cs.canValid), bool(mask & 2), bool(command.latActive))
         enabled_ticks.append((tick, sd.enabled))
+        if EventName.sensorDataInvalid in sd.events.names:
+          bus1_ticks.append(tick)
+        if sd.state_machine.state == log.SelfdriveState.OpenpilotState.softDisabling:
+          soft_ticks.append(tick)
         if tick in (64, 65, 66, 74, 75, 76, 95, 100, 110, 140, 145, 150, 155, 160, 250):
           diagnostics[tick] = (cs.cruiseState.enabled, ci.CS.preap.enableLongControl, card.aol_card_intent.allowed_latch, sd.enabled,
                                str(wanted), sd.events.names, mask, observed[tick], command.actuators.accel)
@@ -216,6 +225,19 @@ def test_real_selected_pedal_fault_withdrawal_and_physical_reengagement(bus, rad
         assert not any(enabled for t, enabled in enabled_ticks), diagnostics
         return
       assert any(observed[t][0] and observed[t][1] for t in range(95, 115)), ('actual initial pedal engagement missing', diagnostics)
+      if fault == 'bus1_runaway':
+        # Reported above the bound from tick 300; the 2.1 s settling after the mode change is long over. Trip after
+        # 1.3 s, then the ordinary 3 s soft disable (no immediate disable); a new double pull while it lasts does not
+        # engage (no entry), and nothing is commanded after the disable.
+        assert bus1_ticks and 430 <= bus1_ticks[0] <= 432 and bus1_ticks == list(range(bus1_ticks[0], 800)), bus1_ticks[:3]
+        assert not [t for t in mismatch_ticks if t >= 60], (mismatch_ticks, diagnostics)
+        assert all(enabled for t, enabled in enabled_ticks if 100 <= t < bus1_ticks[0]), diagnostics
+        assert soft_ticks and soft_ticks[0] == bus1_ticks[0] and len(soft_ticks) >= 290, (soft_ticks[:2], len(soft_ticks))
+        assert all(enabled for t, enabled in enabled_ticks if bus1_ticks[0] <= t < soft_ticks[-1])
+        assert not any(enabled for t, enabled in enabled_ticks if t > soft_ticks[-1] + 1), soft_ticks[-1]
+        assert 720 <= soft_ticks[-1] < 760
+        assert not any(observed[t][0] or observed[t][1] or observed[t][4] for t in range(soft_ticks[-1] + 2, 800)), diagnostics
+        return
       if fault == 'long_withheld':
         # Withdrawn at once (no LONG output), tolerated as ordinary for 1 s, then the immediate-disable fault.
         assert not any(observed[t][0] or observed[t][1] for t in range(132, 230)), diagnostics

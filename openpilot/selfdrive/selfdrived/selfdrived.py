@@ -151,6 +151,9 @@ class SelfdriveD:
     from openpilot.starpilot.car.tesla.stock_events import StockCruiseConsumer
     self.tesla_stock_consumer = StockCruiseConsumer(self.CP)
     self.tesla_stock_alerts = []
+    from openpilot.starpilot.car.tesla.radar_bus_rate import RadarBusRateMonitor
+    self.preap_bus1_rate = RadarBusRateMonitor(self.CP)
+    self.preap_bus1_tripped = False
 
     self.pose_calibrator = PoseCalibrator()
     self.calibrated_pose: Pose | None = None
@@ -544,6 +547,15 @@ class SelfdriveD:
     # Order is very intentional here. Be careful when modifying this.
     # All events here should at least have NO_ENTRY and SOFT_DISABLE.
     num_events = len(self.events)
+
+    # Tesla pre-AP: live bound on the radar-bus interrupt rate, standing in for the panda bit that car identification
+    # latches on every drive (starpilot/car/tesla/radar_bus_rate.py). Soft disable on both axes, no entry.
+    bus1_rate = getattr(self, 'preap_bus1_rate', None)
+    if bus1_rate is not None and bus1_rate.enabled:
+      if self.sm.updated['pandaStates']:
+        self.preap_bus1_tripped = bus1_rate.update(self.sm['pandaStates'], self.sm.logMonoTime['pandaStates'])
+      if self.preap_bus1_tripped:
+        self.events.add(EventName.sensorDataInvalid)
 
     if self.big_model_active and big_failed:
       self.events.add(EventName.bigModelFailed)

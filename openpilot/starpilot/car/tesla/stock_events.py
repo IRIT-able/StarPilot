@@ -40,6 +40,7 @@ class StockCruiseConsumer:
   def __init__(self, cp):
     from openpilot.starpilot.car.tesla.pedal_events import PedalStatusConsumer
     self.pedal = PedalStatusConsumer(cp)
+    self.radar = PedalStatusConsumer(cp, radar_only=True)
     self.binding = cp_fingerprint(cp)
     self.session = None
     self.sequence = -1
@@ -69,7 +70,9 @@ class StockCruiseConsumer:
         alerts.extend(self.update(sm, envelope=envelope, now_ns=now_ns, session=session,
                                   car_state=car_state, source_ns=source_ns, source_valid=source_valid))
     self.pending = [item for item in self.pending if current_stamp < item.logMonoTime <= now_ns + 100_000_000]
-
+    if self.radar.enabled:
+      alerts.extend(self.radar.update(sm, now_ns=now_ns, session=session, car_state=car_state,
+                                      source_ns=source_ns, source_valid=source_valid))
     return alerts
 
   def update(self, sm, *, envelope, now_ns, session, car_state=None, source_ns=None, source_valid=False):

@@ -1150,6 +1150,9 @@ class Car:
       companion.starpilotCarState.pedalMaxRegen = internal.pccEvent == 'pedalMaxRegen'
       radar = getattr(getattr(self, 'RI', None), 'preap', None)
       companion.starpilotCarState.preapRadarStatus = int(radar.status()) if radar is not None else 0
+    elif self.CP.brand == 'tesla':
+      from openpilot.starpilot.car.tesla.pedal_events import stock_radar_companion
+      companion = stock_radar_companion(self.CP, getattr(self, 'RI', None), cs_send)
     steering_authority = getattr(self.CI.CS, 'steering_authority', None)
     if self.CP.brand == 'gm' and steering_authority is not None and steering_authority.enabled:
       companion = messaging.new_message('starpilotCarState', valid=bool(cs_send.valid), logMonoTime=int(cs_send.logMonoTime))

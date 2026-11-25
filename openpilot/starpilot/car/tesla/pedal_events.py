@@ -4,9 +4,32 @@ from openpilot.selfdrive.selfdrived.events import Alert, ET, Priority, VisualAle
 from opendbc.car.tesla.preap.pedal_profile import qualified
 
 
+def stock_radar_configured(cp):
+  # Stock cruise (no pedal) on an admitted pre-AP profile with the radar retrofit configured.
+  from opendbc.car.tesla.preap.aol import qualified as preap_qualified
+  try:
+    return bool(preap_qualified(cp) and not qualified(cp) and not cp.openpilotLongitudinalControl and not cp.radarUnavailable)
+  except (AttributeError, TypeError, ValueError):
+    return False
+
+
+def stock_radar_companion(cp, radar_interface, cs_send):
+  """card: in stock cruise with the radar configured, publish the receiver's status as in pedal mode (warning only)."""
+  if not stock_radar_configured(cp):
+    return None
+  from openpilot.cereal import messaging
+  radar = getattr(radar_interface, 'preap', None)
+  companion = messaging.new_message('starpilotCarState', valid=bool(cs_send.valid), logMonoTime=int(cs_send.logMonoTime))
+  companion.starpilotCarState.sourceCarStateMonoTime = int(cs_send.logMonoTime)
+  companion.starpilotCarState.preapRadarStatus = int(radar.status()) if radar is not None else 0
+  return companion
+
+
 class PedalStatusConsumer:
-  def __init__(self, cp):
-    self.enabled = qualified(cp)
+  def __init__(self, cp, *, radar_only=False):
+    # radar_only: the stock-cruise radar warning alone; the pedal chimes and regen prompt stay pedal-only.
+    self.radar_only = bool(radar_only)
+    self.enabled = stock_radar_configured(cp) if self.radar_only else qualified(cp)
     self.session = None
     self.previous = False
     self.stamp = 0
@@ -28,6 +51,8 @@ class PedalStatusConsumer:
       if stamp <= self.stamp:
         return []
       self.stamp = stamp
+      if getattr(self, 'radar_only', False):
+        return [radar_alert(status.preapRadarStatus == 2)] if status.preapRadarStatus else []
       active = bool(cs.cruiseState.enabled and status.pedalLongActive)
       alerts = []
       if active != self.previous:
